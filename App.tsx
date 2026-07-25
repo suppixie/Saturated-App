@@ -59,7 +59,6 @@ import {
   Modal,
   Platform,
   Pressable,
-  SafeAreaView,
   ScrollView,
   Share,
   StyleSheet,
@@ -68,6 +67,8 @@ import {
   useWindowDimensions,
   View,
 } from "react-native";
+
+import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 
 const C = {
   red: "#cc242c",
@@ -4841,7 +4842,7 @@ export default function App() {
       />
     );
   return (
-    <>
+    <SafeAreaProvider>
       <ResponsiveAppFrame>{body}</ResponsiveAppFrame>
       <Onboarding
         visible={onboard}
@@ -4852,7 +4853,7 @@ export default function App() {
           setScreen("explore");
         }}
       />
-    </>
+    </SafeAreaProvider>
   );
 }
 
