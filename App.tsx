@@ -111,8 +111,8 @@ function createNoisePath(
   return path;
 }
 
-const BACKGROUND_NOISE_MINT = createNoisePath(110, 0x4b7a21, 0.08, 42, 42);
-const BACKGROUND_NOISE_LIGHT = createNoisePath(84, 0xf8e4c2, 0, 42, 42);
+const BACKGROUND_NOISE_MINT = createNoisePath(176, 0x4b7a21, 0.08, 42, 42);
+const BACKGROUND_NOISE_LIGHT = createNoisePath(134, 0xf8e4c2, 0, 42, 42);
 
 type Drink = {
   id: string;
