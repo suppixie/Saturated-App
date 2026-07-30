@@ -28,6 +28,8 @@ npm-debug.*
 yarn-debug.*
 yarn-error.*
 expo-web*.log
+expo-phone*.log
+.catalogue-work/
 
 # macOS
 .DS_Store
