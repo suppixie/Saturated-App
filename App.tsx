@@ -1,5 +1,5 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { supabase } from "./lib/supabase";
+import type { Session } from "@supabase/supabase-js";
 import {
   Boldonse_400Regular,
   useFonts as useBoldonse,
@@ -11,6 +11,7 @@ import {
   useFonts as useDMSans,
 } from "@expo-google-fonts/dm-sans";
 import { BlurView } from "expo-blur";
+import * as ImagePicker from "expo-image-picker";
 import { LinearGradient } from "expo-linear-gradient";
 import { StatusBar } from "expo-status-bar";
 import {
@@ -70,6 +71,41 @@ import {
 
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 
+import {
+  handleAuthCallback,
+  signInWithEmail,
+  signInWithProvider,
+  signUpWithEmail,
+} from "./lib/auth";
+import {
+  addReviewComment,
+  DatabaseBadge,
+  DatabaseBeverage,
+  DatabaseComment,
+  DatabaseProfile,
+  DatabaseReview,
+  deleteCurrentAccount,
+  loadBadges,
+  loadCatalogue,
+  loadCurrentProfile,
+  loadDrinklist,
+  loadDrinkRequests,
+  loadFollowingIds,
+  loadLikedReviewIds,
+  loadProfiles,
+  loadReviewComments,
+  loadReviews,
+  saveReview,
+  submitDrinkRequest,
+  toggleDrinklist,
+  toggleFollow,
+  toggleReviewLike,
+  updateCurrentProfile,
+  uploadAvatar,
+  uploadReviewImage,
+} from "./lib/database";
+import { isSupabaseConfigured, supabase } from "./lib/supabase";
+
 const C = {
   red: "#cc242c",
   teal: "#2b4959",
@@ -121,6 +157,7 @@ type Drink = {
   typeColor: string;
   image: ImageSourcePropType;
   rating: number;
+  reviewCount?: number;
   tags: string[];
   description: string;
   origin?: string;
@@ -129,6 +166,7 @@ type Drink = {
 type Review = {
   id: string;
   drinkId: string;
+  userId?: string;
   user: string;
   avatar: ImageSourcePropType;
   rating: number;
@@ -137,9 +175,11 @@ type Review = {
   date: string;
   likes: number;
   comments: number;
+  imageUrls?: string[];
 };
 type ReviewComment = {
   id: string;
+  userId?: string;
   user: string;
   avatar: ImageSourcePropType;
   text: string;
@@ -153,6 +193,90 @@ type SearchProfile = {
   buddies: number;
   avatar: ImageSourcePropType;
 };
+
+const fallbackAvatar = require("./assets/people/mark.png");
+
+function typeColor(category: string) {
+  const normalized = category.toLowerCase();
+  if (normalized.includes("soft")) return "#2903c0";
+  if (normalized.includes("beer")) return "#84791b";
+  if (normalized.includes("cocktail")) return "#aa0cac";
+  if (normalized.includes("wine")) return "#9c0000";
+  if (normalized.includes("coffee")) return "#a4600d";
+  if (normalized.includes("tea")) return "#7cb100";
+  if (normalized.includes("whiskey")) return "#8a4a12";
+  return "#116d65";
+}
+
+function beverageFromDatabase(beverage: DatabaseBeverage): Drink {
+  return {
+    id: beverage.id,
+    name: beverage.name,
+    type: beverage.category,
+    typeColor: typeColor(beverage.category),
+    image: beverage.image_url ? { uri: beverage.image_url } : fallbackAvatar,
+    rating: Number(beverage.average_rating || 0),
+    reviewCount: beverage.review_count || 0,
+    tags: beverage.official_tags || [],
+    description: beverage.description || "",
+    origin: beverage.origin || undefined,
+    brand: beverage.brand || undefined,
+  };
+}
+
+function reviewFromDatabase(review: DatabaseReview): Review {
+  return {
+    id: review.id,
+    drinkId: review.beverage_id,
+    userId: review.user_id,
+    user: review.display_name || review.username || "Saturated User",
+    avatar: review.avatar_url ? { uri: review.avatar_url } : fallbackAvatar,
+    rating: Number(review.rating),
+    text: review.body,
+    tags: review.flavour_tags || [],
+    date: new Date(review.created_at).toLocaleDateString("en-GB", {
+      day: "numeric",
+      month: "short",
+      year: "numeric",
+    }),
+    likes: review.like_count || 0,
+    comments: review.comment_count || 0,
+    imageUrls: review.image_urls || [],
+  };
+}
+
+function profileFromDatabase(profile: DatabaseProfile): SearchProfile {
+  return {
+    id: profile.id,
+    name: profile.display_name,
+    handle: profile.username
+      ? `@${profile.username.replace(/^@/, "")}`
+      : "@user",
+    memberSince: new Date(profile.created_at).toLocaleDateString("en-GB", {
+      month: "short",
+      year: "numeric",
+    }),
+    buddies: profile.follower_count || 0,
+    avatar: profile.avatar_url ? { uri: profile.avatar_url } : fallbackAvatar,
+  };
+}
+
+function commentFromDatabase(comment: DatabaseComment): ReviewComment {
+  const profile = Array.isArray(comment.profiles)
+    ? comment.profiles[0]
+    : comment.profiles;
+  return {
+    id: comment.id,
+    userId: comment.user_id,
+    user: profile?.display_name || profile?.username || "Saturated User",
+    avatar: profile?.avatar_url ? { uri: profile.avatar_url } : fallbackAvatar,
+    text: comment.body,
+    date: new Date(comment.created_at).toLocaleDateString("en-GB", {
+      day: "numeric",
+      month: "short",
+    }),
+  };
+}
 type Screen =
   | "splash"
   | "explore"
@@ -2126,22 +2250,51 @@ function ResponsiveAppFrame({ children }: { children: React.ReactNode }) {
 
 function Onboarding({
   visible,
-  onDone,
+  onEmailSignIn,
+  onEmailSignUp,
+  onProvider,
 }: {
   visible: boolean;
-  onDone: (name: string) => void;
+  onEmailSignIn: (email: string, password: string) => Promise<void>;
+  onEmailSignUp: (
+    name: string,
+    email: string,
+    password: string,
+  ) => Promise<void>;
+  onProvider: (provider: "google" | "apple") => Promise<void>;
 }) {
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
   const [accountMode, setAccountMode] = useState<"social" | "email" | "create">(
     "social",
   );
-  const finishEmail = () => {
+  const run = async (operation: () => Promise<void>) => {
+    try {
+      setBusy(true);
+      await operation();
+    } catch (error) {
+      Alert.alert(
+        "Could not sign in",
+        error instanceof Error ? error.message : "Please try again.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+  const finishEmail = async () => {
     if (!email.trim() || !email.includes("@"))
       return Alert.alert("Valid email required");
     if (accountMode === "create" && !name.trim())
       return Alert.alert("Name required");
-    onDone(name.trim() || email.split("@")[0] || "Saturated User");
+    if (password.length < 8)
+      return Alert.alert("Password required", "Use at least eight characters.");
+    await run(() =>
+      accountMode === "create"
+        ? onEmailSignUp(name.trim(), email.trim(), password)
+        : onEmailSignIn(email.trim(), password),
+    );
   };
   return (
     <Modal visible={visible} transparent animationType="slide">
@@ -2151,8 +2304,8 @@ function Onboarding({
           <Text style={s.onboardTitle}>Welcome to Saturated</Text>
           <Text style={s.onboardAge}>You must be 21+ to continue</Text>
           <Text style={s.onboardCopy}>
-            Your age will be verified from the date-of-birth information linked
-            to your Google or Apple account. Saturated never displays it.
+            You must be 21 or older. If your sign-in provider supplies verified
+            age eligibility, Saturated stores only the verification result.
           </Text>
           {accountMode === "social" ? (
             <>
@@ -2160,7 +2313,8 @@ function Onboarding({
                 accessibilityRole="button"
                 accessibilityLabel="Continue with Google"
                 style={s.socialButton}
-                onPress={() => onDone("Mark Kelly")}
+                disabled={busy}
+                onPress={() => run(() => onProvider("google"))}
               >
                 <Globe size={20} color="#4285f4" />
                 <Text style={s.socialButtonText}>Continue with Google</Text>
@@ -2169,7 +2323,8 @@ function Onboarding({
                 accessibilityRole="button"
                 accessibilityLabel="Continue with Apple"
                 style={[s.socialButton, s.socialButtonDark]}
-                onPress={() => onDone("Mark Kelly")}
+                disabled={busy}
+                onPress={() => run(() => onProvider("apple"))}
               >
                 <Apple size={21} color="#fff" fill="#fff" />
                 <Text style={[s.socialButtonText, { color: "#fff" }]}>
@@ -2207,17 +2362,31 @@ function Onboarding({
                 placeholderTextColor="rgba(32,26,27,.45)"
                 style={s.input}
               />
+              <TextInput
+                value={password}
+                onChangeText={setPassword}
+                autoCapitalize="none"
+                secureTextEntry
+                placeholder="Password (8+ characters)"
+                placeholderTextColor="rgba(32,26,27,.45)"
+                style={s.input}
+              />
               <Pressable
                 style={[s.primary, s.onboardControl]}
                 accessibilityRole="button"
                 accessibilityLabel={
                   accountMode === "create" ? "Create account" : "Sign in"
                 }
-                onPress={finishEmail}
+                disabled={busy}
+                onPress={() => void finishEmail()}
               >
-                <Text style={s.primaryText}>
-                  {accountMode === "create" ? "Create account" : "Sign in"}
-                </Text>
+                {busy ? (
+                  <ActivityIndicator color="#fff" />
+                ) : (
+                  <Text style={s.primaryText}>
+                    {accountMode === "create" ? "Create account" : "Sign in"}
+                  </Text>
+                )}
               </Pressable>
               <Pressable
                 accessibilityRole="button"
@@ -2263,10 +2432,12 @@ function Splash() {
 }
 
 function Explore({
+  items,
   onOpen,
   onToggle,
   onGo,
 }: {
+  items: Drink[];
   onOpen: (d: Drink) => void;
   onToggle: (id: string) => void;
   onGo: (s: Screen) => void;
@@ -2289,7 +2460,7 @@ function Explore({
     if (filterOptions.includes(drink.type)) return drink.type;
     return "Other";
   };
-  const shown = exploreDrinks.filter((drink) =>
+  const shown = items.filter((drink) =>
     filter === "All" ? true : drinkCategory(drink) === filter,
   );
   return (
@@ -2357,6 +2528,8 @@ function Explore({
 }
 
 function SearchScreen({
+  drinks,
+  profiles,
   saved,
   onBack,
   onOpen,
@@ -2364,6 +2537,8 @@ function SearchScreen({
   onToggle,
   onRequest,
 }: {
+  drinks: Drink[];
+  profiles: SearchProfile[];
   saved: string[];
   onBack: () => void;
   onOpen: (drink: Drink) => void;
@@ -2381,7 +2556,7 @@ function SearchScreen({
         drink.type.toLowerCase().includes(normalized) ||
         drink.tags.some((tag) => tag.toLowerCase().includes(normalized))),
   );
-  const profileResults = searchableProfiles.filter(
+  const profileResults = profiles.filter(
     (profile) =>
       !!normalized &&
       (profile.name.toLowerCase().includes(normalized) ||
@@ -2557,10 +2732,11 @@ function RequestDrinkScreen({
 }: {
   initialName: string;
   onBack: () => void;
-  onSubmit: (name: string) => void;
+  onSubmit: (name: string) => Promise<void>;
 }) {
   const [drinkName, setDrinkName] = useState(initialName);
   const [submitted, setSubmitted] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
   const validName = drinkName.trim();
   return (
     <Background>
@@ -2600,18 +2776,34 @@ function RequestDrinkScreen({
             <Pressable
               accessibilityRole="button"
               accessibilityLabel="Submit drink request"
-              disabled={!validName}
+              disabled={!validName || submitting}
               style={[
                 s.primary,
                 s.requestSubmit,
                 !validName && s.disabledButton,
               ]}
-              onPress={() => {
-                onSubmit(validName);
-                setSubmitted(true);
+              onPress={async () => {
+                try {
+                  setSubmitting(true);
+                  await onSubmit(validName);
+                  setSubmitted(true);
+                } catch (error) {
+                  Alert.alert(
+                    "Could not submit request",
+                    error instanceof Error
+                      ? error.message
+                      : "Please try again.",
+                  );
+                } finally {
+                  setSubmitting(false);
+                }
               }}
             >
-              <Text style={s.primaryText}>Submit request</Text>
+              {submitting ? (
+                <ActivityIndicator color="#fff" />
+              ) : (
+                <Text style={s.primaryText}>Submit request</Text>
+              )}
             </Pressable>
             {submitted && (
               <View style={s.requestSuccess}>
@@ -2936,6 +3128,13 @@ function ReviewDetailScreen({
               <Text style={s.tiny}>{review.date}</Text>
             </View>
             <Text style={s.reviewDetailText}>{review.text}</Text>
+            {!!review.imageUrls?.[0] && (
+              <Image
+                source={{ uri: review.imageUrls[0] }}
+                style={s.reviewDetailUploadedImage}
+                resizeMode="cover"
+              />
+            )}
             <View style={s.reviewDetailFooter}>
               <View style={s.inline}>
                 {review.tags.map((tag) => (
@@ -3052,7 +3251,8 @@ function DrinkProfile({
 }) {
   const mine = reviews.filter((r) => r.drinkId === drink.id);
   const avg = drink.rating;
-  const totalReviews = reviewTotals[drink.id] || mine.length;
+  const totalReviews =
+    drink.reviewCount ?? reviewTotals[drink.id] ?? mine.length;
   const popularTags = Object.entries(
     mine
       .flatMap((review) => review.tags)
@@ -3181,12 +3381,19 @@ function ReviewScreen({
   drink: Drink;
   existingReview?: Review;
   onBack: () => void;
-  onSubmit: (r: number, t: string, tags: string[]) => void;
+  onSubmit: (
+    r: number,
+    t: string,
+    tags: string[],
+    imageUri?: string,
+  ) => Promise<void> | void;
 }) {
   const isEditing = Boolean(existingReview);
   const [rating, setRating] = useState(existingReview?.rating || 0);
   const [text, setText] = useState(existingReview?.text || "");
   const [tags, setTags] = useState<string[]>(existingReview?.tags || []);
+  const [imageUri, setImageUri] = useState<string | undefined>();
+  const [saving, setSaving] = useState(false);
   const [customNote, setCustomNote] = useState("");
   const [addingCustom, setAddingCustom] = useState(false);
   const [availableNotes, setAvailableNotes] = useState(() =>
@@ -3250,6 +3457,40 @@ function ReviewScreen({
               placeholder="What did you think of the drink?..."
               style={s.reviewInput}
             />
+            {!!(imageUri || existingReview?.imageUrls?.[0]) && (
+              <Image
+                source={{ uri: imageUri || existingReview?.imageUrls?.[0] }}
+                style={s.reviewUploadPreview}
+                resizeMode="cover"
+              />
+            )}
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Choose a review photo"
+              style={s.reviewPhotoButton}
+              onPress={async () => {
+                const permission =
+                  await ImagePicker.requestMediaLibraryPermissionsAsync();
+                if (!permission.granted) {
+                  Alert.alert(
+                    "Photo permission required",
+                    "Allow photo access to attach an image to your review.",
+                  );
+                  return;
+                }
+                const picked = await ImagePicker.launchImageLibraryAsync({
+                  mediaTypes: ["images"],
+                  allowsEditing: true,
+                  quality: 0.85,
+                });
+                if (!picked.canceled) setImageUri(picked.assets[0].uri);
+              }}
+            >
+              <Camera size={17} color={C.teal} />
+              <Text style={s.secondaryText}>
+                {imageUri ? "Change photo" : "Add a photo"}
+              </Text>
+            </Pressable>
           </View>
           <View style={[s.notesCard, glass]}>
             <Text style={s.cardTitle}>Flavour notes</Text>
@@ -3323,7 +3564,8 @@ function ReviewScreen({
             accessibilityRole="button"
             accessibilityLabel={isEditing ? "Save review" : "Submit review"}
             style={[s.primary, { margin: 32, height: 46 }]}
-            onPress={() => {
+            disabled={saving}
+            onPress={async () => {
               if (!rating)
                 return Alert.alert(
                   "Choose a rating",
@@ -3338,10 +3580,24 @@ function ReviewScreen({
                     isEditing ? "saving" : "submitting"
                   }.`,
                 );
-              onSubmit(rating, text.trim(), tags);
+              try {
+                setSaving(true);
+                await onSubmit(rating, text.trim(), tags, imageUri);
+              } catch (error) {
+                Alert.alert(
+                  "Could not save review",
+                  error instanceof Error ? error.message : "Please try again.",
+                );
+              } finally {
+                setSaving(false);
+              }
             }}
           >
-            <Text style={s.primaryText}>{isEditing ? "Save" : "Submit"}</Text>
+            {saving ? (
+              <ActivityIndicator color="#fff" />
+            ) : (
+              <Text style={s.primaryText}>{isEditing ? "Save" : "Submit"}</Text>
+            )}
           </Pressable>
         </ScrollView>
       </KeyboardAvoidingView>
@@ -3439,7 +3695,12 @@ function Profile({
   name,
   username,
   profile,
+  ownAvatar,
+  ownUserId,
+  drinks,
   reviews,
+  badges,
+  buddyTotal,
   badgeTab,
   setBadgeTab,
   followed,
@@ -3454,7 +3715,12 @@ function Profile({
   name: string;
   username: string;
   profile?: SearchProfile;
+  ownAvatar?: ImageSourcePropType;
+  ownUserId?: string;
+  drinks: Drink[];
   reviews: Review[];
+  badges?: DatabaseBadge[];
+  buddyTotal?: number;
   badgeTab: boolean;
   setBadgeTab: (b: boolean) => void;
   followed?: boolean;
@@ -3469,16 +3735,33 @@ function Profile({
   const isOwn = !profile;
   const profileName = profile?.name || name || "Mark Kelly";
   const profileHandle = profile?.handle || username || "@markelly1";
-  const profileAvatar = profile?.avatar || require("./assets/people/mark.png");
+  const profileAvatar = profile?.avatar || ownAvatar || fallbackAvatar;
   const memberSince = profile?.memberSince || "Jun 2026";
-  const my = reviews.filter(
-    (r) => r.user === profileName || (isOwn && r.user === "Mark Kelly"),
+  const my = reviews.filter((review) =>
+    profile
+      ? review.userId === profile.id
+      : ownUserId
+        ? review.userId === ownUserId
+        : review.user === profileName || review.user === "Mark Kelly",
   );
-  const earned = Math.min(9, Math.max(2, my.length + 1));
-  const earnedIndices = new Set([0, 4, 1, 2, 3, 5, 6, 7, 8].slice(0, earned));
+  const visibleBadgeNames = badges?.length
+    ? badges.map((badge) => badge.name)
+    : badgeNames;
+  const earned =
+    badges?.filter((badge) => badge.earned_at).length ??
+    Math.min(visibleBadgeNames.length, Math.max(2, my.length + 1));
+  const earnedIndices = new Set(
+    badges?.length
+      ? badges
+          .map((badge, index) => (badge.earned_at ? index : -1))
+          .filter((index) => index >= 0)
+      : [0, 4, 1, 2, 3, 5, 6, 7, 8].slice(0, earned),
+  );
   const avg = my.length ? my.reduce((a, b) => a + b.rating, 0) / my.length : 0;
   const buddyCount = isOwn
-    ? searchableProfiles.find((item) => item.id === "mark")?.buddies || 0
+    ? (buddyTotal ??
+      searchableProfiles.find((item) => item.id === "mark")?.buddies ??
+      0)
     : (profile?.buddies || 0) + (followed ? 1 : 0);
   const shareReceipt = async () => {
     const receiptLines = my.map((review, index) => {
@@ -3583,14 +3866,18 @@ function Profile({
           contentContainerStyle={{ paddingBottom: 125 }}
         >
           <View style={[s.progressCard, glass]}>
-            <ProgressRing value={earned / 9} />
+            <ProgressRing
+              value={earned / Math.max(visibleBadgeNames.length, 1)}
+            />
             <View>
-              <Text style={s.cardTitle}>{earned} of 9 badges unlocked</Text>
+              <Text style={s.cardTitle}>
+                {earned} of {visibleBadgeNames.length} badges unlocked
+              </Text>
               <Text style={s.reviewText}>Try more drinks to earn badges</Text>
             </View>
           </View>
           <View style={s.badges}>
-            {badgeNames.map((badgeName, index) => {
+            {visibleBadgeNames.map((badgeName, index) => {
               const earnedBadge = earnedIndices.has(index);
               const exactArtwork =
                 index === 0
@@ -3770,12 +4057,14 @@ function SettingsScreen({
   name,
   username,
   email,
+  ageVerified,
   requestCount,
   reviewCount,
   savedCount,
   onBack,
   onRequest,
   onSaveAccount,
+  onUploadAvatar,
   onDeleteAccount,
   onLogout,
   initialSection = "menu",
@@ -3783,6 +4072,7 @@ function SettingsScreen({
   name: string;
   username: string;
   email: string;
+  ageVerified: boolean;
   requestCount: number;
   reviewCount: number;
   savedCount: number;
@@ -3792,7 +4082,8 @@ function SettingsScreen({
     name: string;
     username: string;
     email: string;
-  }) => void;
+  }) => Promise<void> | void;
+  onUploadAvatar: () => Promise<void>;
   onDeleteAccount: () => void;
   onLogout: () => void;
   initialSection?: "menu" | "account";
@@ -3833,6 +4124,24 @@ function SettingsScreen({
                 Keep the details shown across your profile and sign-in account
                 up to date.
               </Text>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Upload profile picture"
+                style={s.reviewPhotoButton}
+                onPress={() =>
+                  void onUploadAvatar().catch((error) =>
+                    Alert.alert(
+                      "Could not upload profile picture",
+                      error instanceof Error
+                        ? error.message
+                        : "Please try again.",
+                    ),
+                  )
+                }
+              >
+                <Camera size={17} color={C.teal} />
+                <Text style={s.secondaryText}>Upload profile picture</Text>
+              </Pressable>
               <Text style={s.settingsInputLabel}>Display name</Text>
               <TextInput
                 value={draftName}
@@ -3858,7 +4167,11 @@ function SettingsScreen({
                 placeholder="you@example.com"
               />
               <View style={s.settingsVerifiedRow}>
-                <Text style={s.settingsVerifiedText}>✓ 21+ age verified</Text>
+                <Text style={s.settingsVerifiedText}>
+                  {ageVerified
+                    ? "✓ 21+ age verified"
+                    : "Age verification pending"}
+                </Text>
               </View>
               <Pressable
                 accessibilityRole="button"
@@ -3875,15 +4188,27 @@ function SettingsScreen({
                     ? draftUsername.trim()
                     : `@${draftUsername.trim()}`;
                   setDraftUsername(normalizedUsername);
-                  onSaveAccount({
-                    name: draftName.trim(),
-                    username: normalizedUsername,
-                    email: draftEmail.trim(),
-                  });
-                  Alert.alert(
-                    "Account updated",
-                    "Your profile details were saved.",
-                  );
+                  void Promise.resolve(
+                    onSaveAccount({
+                      name: draftName.trim(),
+                      username: normalizedUsername,
+                      email: draftEmail.trim(),
+                    }),
+                  )
+                    .then(() =>
+                      Alert.alert(
+                        "Account updated",
+                        "Your profile details were saved.",
+                      ),
+                    )
+                    .catch((error) =>
+                      Alert.alert(
+                        "Could not update account",
+                        error instanceof Error
+                          ? error.message
+                          : "Please try again.",
+                      ),
+                    );
                 }}
                 style={s.settingsPrimaryButton}
               >
@@ -3933,7 +4258,7 @@ function SettingsScreen({
                 onPress={() =>
                   Alert.alert(
                     "Delete account data?",
-                    "This removes the local profile, reviews, lists and settings from this device.",
+                    "This permanently deletes your Saturated account, profile, reviews, comments, likes, Drinklist and follows. This cannot be undone.",
                     [
                       { text: "Cancel", style: "cancel" },
                       {
@@ -3946,7 +4271,9 @@ function SettingsScreen({
                 }
                 style={s.settingsDeleteButton}
               >
-                <Text style={s.settingsDeleteText}>Delete account data</Text>
+                <Text style={s.settingsDeleteText}>
+                  Delete account permanently
+                </Text>
               </Pressable>
             </View>
           )}
@@ -4224,29 +4551,62 @@ const feedActivity: FeedActivity[] = [
 ];
 
 function Feed({
+  drinks,
+  profiles,
+  reviews,
+  followingIds,
   onBack,
   onOpen,
   onOpenProfile,
   onOpenReview,
 }: {
+  drinks: Drink[];
+  profiles: SearchProfile[];
+  reviews: Review[];
+  followingIds: string[];
   onBack: () => void;
   onOpen: (drink: Drink) => void;
   onOpenProfile: (profile: SearchProfile) => void;
   onOpenReview: (review: Review) => void;
 }) {
   const [showAll, setShowAll] = useState(false);
-  const visibleFriends = showAll
-    ? [
-        ...feedFriendCards,
-        ...exploreDrinks.slice(5, 10).map((drink) => ({
-          drinkId: drink.id,
-          source: drink.image,
-          count: "3",
-        })),
-      ]
+  const followedReviews = reviews.filter(
+    (review) => review.userId && followingIds.includes(review.userId),
+  );
+  const followedDrinkCounts = new Map<string, number>();
+  followedReviews.forEach((review) =>
+    followedDrinkCounts.set(
+      review.drinkId,
+      (followedDrinkCounts.get(review.drinkId) || 0) + 1,
+    ),
+  );
+  const liveFriendCards = Array.from(followedDrinkCounts.entries()).map(
+    ([drinkId, count]) => ({
+      drinkId,
+      source: drinks.find((drink) => drink.id === drinkId)?.image,
+      count: count > 9 ? "10+" : String(count),
+    }),
+  );
+  const allFriendCards = liveFriendCards.length
+    ? liveFriendCards
     : feedFriendCards;
+  const visibleFriends = showAll ? allFriendCards : allFriendCards.slice(0, 5);
   const drinkById = (id: string) =>
     drinks.find((drink) => drink.id === id) || drinks[0];
+  const liveActivity = followedReviews.map((review, index) => ({
+    name: review.user,
+    message: `reviewed ${drinkById(review.drinkId).name}`,
+    action: "Read the review â†’",
+    time: index === 0 ? "Just now" : review.date,
+    avatar: review.avatar,
+    drinkId: review.drinkId,
+    profileId: review.userId,
+    reviewId: review.id,
+    target: "review",
+    group: index === 0 ? "Recent activity" : undefined,
+    quote: false,
+  }));
+  const activityItems = liveActivity.length ? liveActivity : feedActivity;
 
   return (
     <Background creamOpacity={0.5}>
@@ -4288,15 +4648,7 @@ function Feed({
               onPress={() => onOpen(drinkById(friend.drinkId))}
               style={s.friendDrink}
             >
-              {index < 5 ? (
-                <Image
-                  source={friend.source}
-                  style={s.friendComposite}
-                  resizeMode="contain"
-                />
-              ) : (
-                <CompactFeedDrinkCard drink={drinkById(friend.drinkId)} />
-              )}
+              <CompactFeedDrinkCard drink={drinkById(friend.drinkId)} />
               <View style={s.friendSocialRow}>
                 <Text style={s.friendCount}>{friend.count}</Text>
                 <View style={s.friendAvatarStack}>
@@ -4320,7 +4672,7 @@ function Feed({
           ))}
         </ScrollView>
         <Text style={s.activityTitle}>Friends Activity</Text>
-        {feedActivity.map((activity, index) => (
+        {activityItems.map((activity, index) => (
           <View key={`${activity.name}-${index}`}>
             {!!activity.group && (
               <Text style={s.activityGroup}>{activity.group}</Text>
@@ -4330,14 +4682,14 @@ function Feed({
               accessibilityLabel={`${activity.name} ${activity.message}`}
               onPress={() => {
                 if (activity.reviewId) {
-                  const reviewToOpen = initialReviews.find(
+                  const reviewToOpen = reviews.find(
                     (item) => item.id === activity.reviewId,
                   );
                   if (reviewToOpen) onOpenReview(reviewToOpen);
                   return;
                 }
                 if (activity.target === "profile" && activity.profileId) {
-                  const profile = searchableProfiles.find(
+                  const profile = profiles.find(
                     (item) => item.id === activity.profileId,
                   );
                   if (profile) onOpenProfile(profile);
@@ -4390,10 +4742,18 @@ export default function App() {
   const [bold] = useBoldonse({ Boldonse: Boldonse_400Regular });
   const [screen, setScreen] = useState<Screen>("splash");
   const [onboard, setOnboard] = useState(false);
+  const [session, setSession] = useState<Session | null>(null);
+  const [currentProfile, setCurrentProfile] = useState<DatabaseProfile | null>(
+    null,
+  );
+  const [catalogueDrinks, setCatalogueDrinks] = useState<Drink[]>(drinks);
+  const [databaseProfiles, setDatabaseProfiles] =
+    useState<SearchProfile[]>(searchableProfiles);
+  const [badges, setBadges] = useState<DatabaseBadge[]>([]);
   const [name, setName] = useState("Mark Kelly");
   const [username, setUsername] = useState("@markelly1");
   const [email, setEmail] = useState("mark@example.com");
-  const [saved, setSaved] = useState(["aperol", "sprite", "hophouse"]);
+  const [saved, setSaved] = useState<string[]>([]);
   const [reviews, setReviews] = useState(initialReviews);
   const [likedReviews, setLikedReviews] = useState<string[]>([]);
   const [commentThreads, setCommentThreads] = useState<
@@ -4423,45 +4783,162 @@ export default function App() {
   >("menu");
   const [onboarded, setOnboarded] = useState(false);
   const [ready, setReady] = useState(false);
+
+  const refreshDatabaseState = async (activeSession: Session | null) => {
+    const [catalogueRows, profileRows, reviewRows] = await Promise.all([
+      loadCatalogue(),
+      loadProfiles(),
+      loadReviews(),
+    ]);
+    const mappedDrinks = catalogueRows.map(beverageFromDatabase);
+    const mappedProfiles = profileRows.map(profileFromDatabase);
+    const mappedReviews = reviewRows.map(reviewFromDatabase);
+    setCatalogueDrinks(mappedDrinks);
+    setDatabaseProfiles(mappedProfiles);
+    setReviews(mappedReviews);
+    setSelected((current) => {
+      return (
+        mappedDrinks.find((drink) => drink.id === current.id) ||
+        mappedDrinks[0] ||
+        current
+      );
+    });
+    setSelectedProfile((current) => {
+      return (
+        mappedProfiles.find((profile) => profile.id === current.id) ||
+        mappedProfiles[0] ||
+        current
+      );
+    });
+
+    if (!activeSession) {
+      setCurrentProfile(null);
+      setSaved([]);
+      setLikedReviews([]);
+      setFollowedProfiles([]);
+      setBadges([]);
+      setRequests([]);
+      return;
+    }
+
+    const userId = activeSession.user.id;
+    const [
+      profile,
+      drinklistIds,
+      likedIds,
+      followingIds,
+      badgeRows,
+      requestRows,
+    ] = await Promise.all([
+      loadCurrentProfile(userId),
+      loadDrinklist(userId),
+      loadLikedReviewIds(userId),
+      loadFollowingIds(userId),
+      loadBadges(userId),
+      loadDrinkRequests(userId),
+    ]);
+    setCurrentProfile(profile);
+    setName(profile.display_name || "Saturated User");
+    setUsername(
+      profile.username ? `@${profile.username.replace(/^@/, "")}` : "@user",
+    );
+    setEmail(activeSession.user.email || "");
+    setSaved(drinklistIds);
+    setLikedReviews(likedIds);
+    setFollowedProfiles(followingIds);
+    setBadges(badgeRows);
+    setRequests(
+      requestRows
+        .map((request) => String(request.drink_name || ""))
+        .filter(Boolean),
+    );
+  };
+
   useEffect(() => {
-    AsyncStorage.getItem(STORAGE_KEY)
-      .then((raw) => {
-        const x = raw ? JSON.parse(raw) : null;
-        if (x?.onboarded) {
-          setOnboarded(true);
-          setName(x.name || "Mark Kelly");
-          setUsername(x.username || "@markelly1");
-          setEmail(x.email || "mark@example.com");
-          setSaved(x.saved || []);
-          setReviews(mergeSeedReviews(x.reviews));
-          setLikedReviews(x.likedReviews || []);
-          setCommentThreads(mergeSeedCommentThreads(x.commentThreads));
-          setRequests(x.requests || []);
-          setFollowedProfiles(x.followedProfiles || []);
-          setScreen("explore");
-        } else {
+    if (!supabase) {
+      AsyncStorage.getItem(STORAGE_KEY)
+        .then((raw) => {
+          const stored = raw ? JSON.parse(raw) : null;
+          if (stored?.onboarded) {
+            setOnboarded(true);
+            setName(stored.name || "Mark Kelly");
+            setUsername(stored.username || "@markelly1");
+            setEmail(stored.email || "mark@example.com");
+            setSaved(stored.saved || []);
+            setReviews(mergeSeedReviews(stored.reviews));
+            setLikedReviews(stored.likedReviews || []);
+            setCommentThreads(mergeSeedCommentThreads(stored.commentThreads));
+            setRequests(stored.requests || []);
+            setFollowedProfiles(stored.followedProfiles || []);
+            setScreen("explore");
+          } else {
+            setScreen("splash");
+            setOnboard(true);
+          }
+        })
+        .catch(() => {
           setScreen("splash");
           setOnboard(true);
-        }
+        })
+        .finally(() => setReady(true));
+      return;
+    }
+
+    let active = true;
+    const applySession = async (nextSession: Session | null) => {
+      if (!active) return;
+      setSession(nextSession);
+      await refreshDatabaseState(nextSession);
+      if (!active) return;
+      setOnboarded(Boolean(nextSession));
+      setOnboard(!nextSession);
+      setScreen(nextSession ? "explore" : "splash");
+    };
+    const consumeAuthUrl = (url: string | null) => {
+      if (url?.includes("auth/callback")) {
+        void handleAuthCallback(url).catch((error) =>
+          Alert.alert("Sign-in failed", error.message),
+        );
+      }
+    };
+    const urlSubscription = Linking.addEventListener("url", ({ url }) =>
+      consumeAuthUrl(url),
+    );
+    void Linking.getInitialURL().then(consumeAuthUrl);
+    const authSubscription = supabase.auth.onAuthStateChange(
+      (event, nextSession) => {
+        if (event === "INITIAL_SESSION") return;
+        setTimeout(() => {
+          void applySession(nextSession).catch((error) =>
+            Alert.alert("Could not load your account", error.message),
+          );
+        }, 0);
+      },
+    );
+    supabase.auth
+      .getSession()
+      .then(({ data, error }) => {
+        if (error) throw error;
+        return applySession(data.session);
       })
-      .catch(() => {
-        setScreen("splash");
+      .catch((error) => {
+        if (!active) return;
+        Alert.alert("Could not connect to Saturated", error.message);
         setOnboard(true);
+        setScreen("splash");
       })
-      .finally(() => setReady(true));
+      .finally(() => {
+        if (active) setReady(true);
+      });
+    return () => {
+      active = false;
+      urlSubscription.remove();
+      authSubscription.data.subscription.unsubscribe();
+    };
   }, []);
+
   useEffect(() => {
-    if (!ready) return;
-    setReviews((current) => {
-      const merged = mergeSeedReviews(current);
-      return merged.length === current.length &&
-        merged.every((review, index) => review === current[index])
-        ? current
-        : merged;
-    });
-  }, [ready]);
-  useEffect(() => {
-    if (ready)
+    if (ready && !isSupabaseConfigured)
       AsyncStorage.setItem(
         STORAGE_KEY,
         JSON.stringify({
@@ -4490,6 +4967,10 @@ export default function App() {
     requests,
     followedProfiles,
   ]);
+  const appDrinks = catalogueDrinks.length ? catalogueDrinks : drinks;
+  const appProfiles = databaseProfiles.length
+    ? databaseProfiles
+    : searchableProfiles;
   const go = (nextScreen: Screen) => {
     if (nextScreen === "search") setSearchReturn(screen);
     setScreen(nextScreen);
@@ -4515,7 +4996,7 @@ export default function App() {
       setScreen("profile");
       return;
     }
-    const matchingProfile = searchableProfiles.find(
+    const matchingProfile = appProfiles.find(
       (profile) => profile.name.toLowerCase() === normalizedName,
     );
     if (matchingProfile) openProfile(matchingProfile);
@@ -4528,7 +5009,7 @@ export default function App() {
     setScreen("review");
   };
   const editReview = (reviewToEdit: Review) => {
-    const drinkToEdit = drinks.find(
+    const drinkToEdit = appDrinks.find(
       (drink) => drink.id === reviewToEdit.drinkId,
     );
     if (!drinkToEdit) return;
@@ -4558,8 +5039,21 @@ export default function App() {
     }
     setSelectedReviewId(reviewToOpen.id);
     setSelected(
-      drinks.find((drink) => drink.id === reviewToOpen.drinkId) || drinks[0],
+      appDrinks.find((drink) => drink.id === reviewToOpen.drinkId) ||
+        appDrinks[0],
     );
+    if (session) {
+      void loadReviewComments(reviewToOpen.id)
+        .then((comments) =>
+          setCommentThreads((current) => ({
+            ...current,
+            [reviewToOpen.id]: comments.map(commentFromDatabase),
+          })),
+        )
+        .catch((error) =>
+          Alert.alert("Could not load comments", error.message),
+        );
+    }
     setScreen("reviewDetail");
   };
   const requestDrink = (returnScreen: Screen, initialName = "") => {
@@ -4567,30 +5061,77 @@ export default function App() {
     setRequestDraft(initialName);
     setScreen("request");
   };
-  const toggle = (id: string) =>
-    setSaved((x) => (x.includes(id) ? x.filter((y) => y !== id) : [...x, id]));
-  const like = (id: string) =>
-    setLikedReviews((current) => {
-      const alreadyLiked = current.includes(id);
+  const requireAccount = () => {
+    if (session) return true;
+    setOnboard(true);
+    setScreen("splash");
+    return false;
+  };
+  const toggle = async (id: string) => {
+    if (!requireAccount()) return;
+    try {
+      const added = await toggleDrinklist(id);
+      setSaved((current) =>
+        added
+          ? Array.from(new Set([...current, id]))
+          : current.filter((item) => item !== id),
+      );
+    } catch (error) {
+      Alert.alert(
+        "Could not update Drinklist",
+        error instanceof Error ? error.message : "Please try again.",
+      );
+    }
+  };
+  const like = async (id: string) => {
+    if (!requireAccount()) return;
+    try {
+      const liked = await toggleReviewLike(id);
+      setLikedReviews((current) =>
+        liked
+          ? Array.from(new Set([...current, id]))
+          : current.filter((reviewId) => reviewId !== id),
+      );
       setReviews((allReviews) =>
         allReviews.map((item) =>
           item.id === id
             ? {
                 ...item,
-                likes: Math.max(0, item.likes + (alreadyLiked ? -1 : 1)),
+                likes: Math.max(
+                  0,
+                  item.likes +
+                    (likedReviews.includes(id)
+                      ? liked
+                        ? 0
+                        : -1
+                      : liked
+                        ? 1
+                        : 0),
+                ),
               }
             : item,
         ),
       );
-      return alreadyLiked
-        ? current.filter((reviewId) => reviewId !== id)
-        : [...current, id];
-    });
-  const addComment = (reviewId: string, text: string) => {
+    } catch (error) {
+      Alert.alert(
+        "Could not update like",
+        error instanceof Error ? error.message : "Please try again.",
+      );
+    }
+  };
+  const addComment = async (reviewId: string, text: string) => {
+    if (!session || !currentProfile) {
+      requireAccount();
+      return;
+    }
+    const inserted = await addReviewComment(reviewId, text);
     const newComment: ReviewComment = {
-      id: `${reviewId}-${Date.now()}`,
-      user: name || "Mark Kelly",
-      avatar: require("./assets/people/mark.png"),
+      id: inserted.id,
+      userId: session.user.id,
+      user: currentProfile.display_name || "Saturated User",
+      avatar: currentProfile.avatar_url
+        ? { uri: currentProfile.avatar_url }
+        : fallbackAvatar,
       text,
       date: "Now",
     };
@@ -4611,22 +5152,33 @@ export default function App() {
       </View>
     );
   const selectedReview =
-    reviews.find((item) => item.id === selectedReviewId) || reviews[0];
+    reviews.find((item) => item.id === selectedReviewId) ||
+    reviews[0] ||
+    initialReviews[0];
   const reviewBeingEdited = editingReviewId
     ? reviews.find((item) => item.id === editingReviewId)
     : undefined;
   let body: React.ReactNode;
   if (screen === "splash") body = <Splash />;
   else if (screen === "explore")
-    body = <Explore onOpen={open} onToggle={toggle} onGo={go} />;
+    body = (
+      <Explore
+        items={appDrinks}
+        onOpen={open}
+        onToggle={(id) => void toggle(id)}
+        onGo={go}
+      />
+    );
   else if (screen === "search")
     body = (
       <SearchScreen
+        drinks={appDrinks}
+        profiles={appProfiles}
         saved={saved}
         onBack={() => go(searchReturn)}
         onOpen={open}
         onOpenProfile={openProfile}
-        onToggle={toggle}
+        onToggle={(id) => void toggle(id)}
         onRequest={(drinkName) => requestDrink("search", drinkName)}
       />
     );
@@ -4635,22 +5187,24 @@ export default function App() {
       <RequestDrinkScreen
         initialName={requestDraft}
         onBack={() => setScreen(requestReturn)}
-        onSubmit={(drinkName) =>
+        onSubmit={async (drinkName) => {
+          if (!requireAccount()) throw new Error("Sign in to request a drink.");
+          await submitDrinkRequest(drinkName);
           setRequests((current) =>
             current.some(
               (request) => request.toLowerCase() === drinkName.toLowerCase(),
             )
               ? current
               : [...current, drinkName],
-          )
-        }
+          );
+        }}
       />
     );
   else if (screen === "drinklist")
     body = (
       <Drinklist
-        items={drinks.filter((d) => saved.includes(d.id))}
-        onRemove={toggle}
+        items={appDrinks.filter((d) => saved.includes(d.id))}
+        onRemove={(id) => void toggle(id)}
         onOpen={open}
         onReview={review}
         onGo={go}
@@ -4664,8 +5218,8 @@ export default function App() {
         saved={saved.includes(selected.id)}
         onBack={() => setScreen(drinkReturn)}
         onReview={() => review(selected)}
-        onToggle={() => toggle(selected.id)}
-        onLike={like}
+        onToggle={() => void toggle(selected.id)}
+        onLike={(id) => void like(id)}
         likedReviewIds={likedReviews}
         onOpenReview={openReview}
         onOpenProfile={openProfileByName}
@@ -4676,14 +5230,14 @@ export default function App() {
       <ReviewDetailScreen
         review={selectedReview}
         drink={
-          drinks.find((drink) => drink.id === selectedReview.drinkId) ||
-          drinks[0]
+          appDrinks.find((drink) => drink.id === selectedReview.drinkId) ||
+          appDrinks[0]
         }
         liked={likedReviews.includes(selectedReview.id)}
         comments={commentThreads[selectedReview.id] || []}
         onBack={() => setScreen(reviewDetailReturn)}
-        onLike={() => like(selectedReview.id)}
-        onAddComment={(text) => addComment(selectedReview.id, text)}
+        onLike={() => void like(selectedReview.id)}
+        onAddComment={(text) => void addComment(selectedReview.id, text)}
         onOpenProfile={openProfileByName}
         onOpenDrink={open}
         activeTab={reviewDetailTab}
@@ -4700,41 +5254,33 @@ export default function App() {
           setEditingReviewId(null);
           setScreen(reviewReturn);
         }}
-        onSubmit={(rating, text, tags) => {
-          if (editingReviewId && reviewBeingEdited) {
-            setReviews((current) =>
-              current.map((item) =>
-                item.id === editingReviewId
-                  ? { ...item, rating, text, tags }
-                  : item,
-              ),
-            );
-            setEditingReviewId(null);
-            setScreen(reviewReturn);
+        onSubmit={async (rating, text, tags, imageUri) => {
+          if (!session) {
+            requireAccount();
             return;
           }
-          setReviews((x) => [
-            {
-              id: Date.now().toString(),
-              drinkId: selected.id,
-              user: name,
-              avatar: require("./assets/people/mark.png"),
-              rating,
-              text,
-              tags,
-              date: new Date().toLocaleDateString("en-GB", {
-                day: "numeric",
-                month: "short",
-                year: "numeric",
-              }),
-              likes: 0,
-              comments: 0,
-            },
-            ...x,
-          ]);
-          setSaved((x) => x.filter((id) => id !== selected.id));
+          const reviewId = await saveReview({
+            beverageId: selected.id,
+            rating,
+            body: text,
+            tags,
+          });
+          if (imageUri) {
+            await uploadReviewImage(session.user.id, reviewId, imageUri);
+          }
+          const [reviewRows, catalogueRows, drinklistIds, badgeRows] =
+            await Promise.all([
+              loadReviews(),
+              loadCatalogue(),
+              loadDrinklist(session.user.id),
+              loadBadges(session.user.id),
+            ]);
+          setReviews(reviewRows.map(reviewFromDatabase));
+          setCatalogueDrinks(catalogueRows.map(beverageFromDatabase));
+          setSaved(drinklistIds);
+          setBadges(badgeRows);
           setEditingReviewId(null);
-          go("drink");
+          setScreen(editingReviewId ? reviewReturn : "drink");
         }}
       />
     );
@@ -4743,7 +5289,16 @@ export default function App() {
       <Profile
         name={name}
         username={username}
+        ownAvatar={
+          currentProfile?.avatar_url
+            ? { uri: currentProfile.avatar_url }
+            : fallbackAvatar
+        }
+        ownUserId={session?.user.id}
+        drinks={appDrinks}
         reviews={reviews}
+        badges={badges}
+        buddyTotal={followedProfiles.length}
         badgeTab={badgeTab}
         setBadgeTab={setBadgeTab}
         onGo={go}
@@ -4766,17 +5321,25 @@ export default function App() {
         name={name}
         username={username}
         profile={selectedProfile}
+        drinks={appDrinks}
         reviews={reviews}
         badgeTab={badgeTab}
         setBadgeTab={setBadgeTab}
         followed={followedProfiles.includes(selectedProfile.id)}
-        onToggleFollow={() =>
-          setFollowedProfiles((current) =>
-            current.includes(selectedProfile.id)
-              ? current.filter((id) => id !== selectedProfile.id)
-              : [...current, selectedProfile.id],
-          )
-        }
+        onToggleFollow={() => {
+          if (!requireAccount()) return;
+          void toggleFollow(selectedProfile.id)
+            .then((followed) =>
+              setFollowedProfiles((current) =>
+                followed
+                  ? Array.from(new Set([...current, selectedProfile.id]))
+                  : current.filter((id) => id !== selectedProfile.id),
+              ),
+            )
+            .catch((error) =>
+              Alert.alert("Could not update buddy", error.message),
+            );
+        }}
         onBack={() => setScreen(profileReturn)}
         onGo={go}
         onEditReview={editReview}
@@ -4792,6 +5355,7 @@ export default function App() {
         name={name}
         username={username}
         email={email}
+        ageVerified={Boolean(currentProfile?.birth_verified_at)}
         requestCount={requests.length}
         reviewCount={
           reviews.filter(
@@ -4802,27 +5366,54 @@ export default function App() {
         initialSection={settingsInitialSection}
         onBack={() => go("profile")}
         onRequest={() => requestDrink("settings")}
-        onSaveAccount={(details) => {
-          setName(details.name);
-          setUsername(details.username);
+        onSaveAccount={async (details) => {
+          if (!session) return;
+          const profile = await updateCurrentProfile(session.user, {
+            displayName: details.name,
+            username: details.username,
+            email: details.email,
+          });
+          setCurrentProfile(profile);
+          setName(profile.display_name);
+          setUsername(
+            profile.username
+              ? `@${profile.username.replace(/^@/, "")}`
+              : "@user",
+          );
           setEmail(details.email);
+          setDatabaseProfiles((await loadProfiles()).map(profileFromDatabase));
+        }}
+        onUploadAvatar={async () => {
+          if (!session) return;
+          const permission =
+            await ImagePicker.requestMediaLibraryPermissionsAsync();
+          if (!permission.granted) {
+            Alert.alert(
+              "Photo permission required",
+              "Allow photo access to update your profile picture.",
+            );
+            return;
+          }
+          const picked = await ImagePicker.launchImageLibraryAsync({
+            mediaTypes: ["images"],
+            allowsEditing: true,
+            aspect: [1, 1],
+            quality: 0.85,
+          });
+          if (picked.canceled) return;
+          const avatarUrl = await uploadAvatar(
+            session.user.id,
+            picked.assets[0].uri,
+          );
+          setCurrentProfile((profile) =>
+            profile ? { ...profile, avatar_url: avatarUrl } : profile,
+          );
+          setDatabaseProfiles((await loadProfiles()).map(profileFromDatabase));
         }}
         onDeleteAccount={() => {
-          void supabase?.auth.signOut();
-          AsyncStorage.removeItem(STORAGE_KEY).finally(() => {
-            setName("Mark Kelly");
-            setUsername("@markelly1");
-            setEmail("mark@example.com");
-            setSaved([]);
-            setReviews(initialReviews);
-            setLikedReviews([]);
-            setCommentThreads(initialCommentThreads);
-            setRequests([]);
-            setFollowedProfiles([]);
-            setOnboarded(false);
-            setOnboard(true);
-            setScreen("splash");
-          });
+          void deleteCurrentAccount().catch((error) =>
+            Alert.alert("Could not delete account", error.message),
+          );
         }}
         onLogout={() => {
           void supabase?.auth.signOut();
@@ -4835,6 +5426,10 @@ export default function App() {
   else
     body = (
       <Feed
+        drinks={appDrinks}
+        profiles={appProfiles}
+        reviews={reviews}
+        followingIds={followedProfiles}
         onBack={() => go("explore")}
         onOpen={open}
         onOpenProfile={openProfile}
@@ -4846,11 +5441,24 @@ export default function App() {
       <ResponsiveAppFrame>{body}</ResponsiveAppFrame>
       <Onboarding
         visible={onboard}
-        onDone={(n) => {
-          setName(n);
-          setOnboarded(true);
-          setOnboard(false);
-          setScreen("explore");
+        onEmailSignIn={async (accountEmail, password) => {
+          await signInWithEmail(accountEmail, password);
+        }}
+        onEmailSignUp={async (displayName, accountEmail, password) => {
+          const result = await signUpWithEmail(
+            displayName,
+            accountEmail,
+            password,
+          );
+          if (!result.session) {
+            Alert.alert(
+              "Check your email",
+              "Open the confirmation link, then return to Saturated to finish signing in.",
+            );
+          }
+        }}
+        onProvider={async (provider) => {
+          await signInWithProvider(provider);
         }}
       />
     </SafeAreaProvider>
@@ -5555,6 +6163,13 @@ const s = StyleSheet.create({
     color: C.ink,
     marginVertical: 22,
   },
+  reviewDetailUploadedImage: {
+    width: "100%",
+    height: 190,
+    borderRadius: 18,
+    marginBottom: 18,
+    backgroundColor: "rgba(255,255,255,.55)",
+  },
   reviewDetailFooter: {
     flexDirection: "row",
     alignItems: "center",
@@ -5698,7 +6313,7 @@ const s = StyleSheet.create({
   halfStarButton: { flex: 1 },
   ratingNumber: { fontFamily: F.bold, fontSize: 36, color: C.ink },
   formCard: {
-    height: 264,
+    minHeight: 264,
     marginHorizontal: 33,
     borderRadius: 23,
     padding: 12,
@@ -5711,6 +6326,27 @@ const s = StyleSheet.create({
     padding: 12,
     fontFamily: F.regular,
     fontSize: 12,
+  },
+  reviewUploadPreview: {
+    width: "100%",
+    height: 150,
+    marginTop: 12,
+    borderRadius: 16,
+    backgroundColor: "rgba(255,255,255,.7)",
+  },
+  reviewPhotoButton: {
+    minHeight: 42,
+    marginTop: 12,
+    marginBottom: 2,
+    paddingHorizontal: 16,
+    borderRadius: 21,
+    borderWidth: 0.75,
+    borderColor: "rgba(43,73,89,.35)",
+    backgroundColor: "rgba(255,255,255,.68)",
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
   },
   notesCard: {
     margin: 22,

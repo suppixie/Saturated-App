@@ -22,6 +22,15 @@
       "predictiveBackGestureEnabled": false
     },
     "scheme": "saturated",
+    "plugins": [
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Allow Saturated to choose profile and review photos.",
+          "cameraPermission": "Allow Saturated to take profile and review photos."
+        }
+      ]
+    ],
     "extra": {
       "eas": {
         "projectId": "3fa74864-3caf-47f1-a5f5-7f48d7515523"
