@@ -38,7 +38,7 @@ import {
   Users,
   X,
 } from "lucide-react-native";
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import Svg, {
   Circle,
   Defs,
@@ -52,6 +52,8 @@ import Svg, {
 import {
   ActivityIndicator,
   Alert,
+  Animated,
+  Easing,
   FlatList,
   Image,
   ImageSourcePropType,
@@ -62,7 +64,6 @@ import {
   Pressable,
   ScrollView,
   Share,
-  StyleSheet,
   Text,
   TextInput,
   useWindowDimensions,
@@ -72,7 +73,10 @@ import {
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 
 import {
+  answerOAuthConsentRequest,
   handleAuthCallback,
+  loadOAuthConsentRequest,
+  OAuthConsentRequest,
   signInWithEmail,
   signInWithProvider,
   signUpWithEmail,
@@ -100,30 +104,42 @@ import {
   toggleDrinklist,
   toggleFollow,
   toggleReviewLike,
+  updateCurrentDateOfBirth,
   updateCurrentProfile,
   uploadAvatar,
   uploadReviewImage,
 } from "./lib/database";
 import { isSupabaseConfigured, supabase } from "./lib/supabase";
-
-const C = {
-  red: "#cc242c",
-  teal: "#2b4959",
-  green: "#04b264",
-  ink: "#201a1b",
-  cream: "#fffef8",
-  gold: "#ffd700",
-};
-const F = {
-  display: "Boldonse",
-  regular: "DMSans",
-  medium: "DMSansMedium",
-  bold: "DMSansBold",
-};
+import { catalogueImages } from "./src/data/catalogueImages";
+import {
+  drinks,
+  featuredCatalogueOrder,
+  initialCommentThreads,
+  initialReviews,
+  mergeSeedCommentThreads,
+  mergeSeedReviews,
+  reviewTotals,
+  searchableProfiles,
+} from "./src/data/seedData";
+import {
+  C,
+  EXPLORE_PAGE_SIZE,
+  F,
+  FIGMA_FRAME_HEIGHT,
+  FIGMA_FRAME_WIDTH,
+  glass,
+} from "./src/theme";
+import s from "./src/styles";
+import type {
+  Drink,
+  Review,
+  ReviewComment,
+  Screen,
+  SearchProfile,
+} from "./src/types";
 
 const STORAGE_KEY = "saturated-state-v7";
-const FIGMA_FRAME_WIDTH = 441;
-const FIGMA_FRAME_HEIGHT = 918;
+const PENDING_BIRTH_DATE_KEY = "saturated-pending-date-of-birth";
 
 function createNoisePath(
   count: number,
@@ -147,54 +163,53 @@ function createNoisePath(
   return path;
 }
 
-const BACKGROUND_NOISE_MINT = createNoisePath(176, 0x4b7a21, 0.08, 42, 42);
-const BACKGROUND_NOISE_LIGHT = createNoisePath(134, 0xf8e4c2, 0, 42, 42);
-
-type Drink = {
-  id: string;
-  name: string;
-  type: string;
-  typeColor: string;
-  image: ImageSourcePropType;
-  rating: number;
-  reviewCount?: number;
-  tags: string[];
-  description: string;
-  origin?: string;
-  brand?: string;
-};
-type Review = {
-  id: string;
-  drinkId: string;
-  userId?: string;
-  user: string;
-  avatar: ImageSourcePropType;
-  rating: number;
-  text: string;
-  tags: string[];
-  date: string;
-  likes: number;
-  comments: number;
-  imageUrls?: string[];
-};
-type ReviewComment = {
-  id: string;
-  userId?: string;
-  user: string;
-  avatar: ImageSourcePropType;
-  text: string;
-  date: string;
-};
-type SearchProfile = {
-  id: string;
-  name: string;
-  handle: string;
-  memberSince: string;
-  buddies: number;
-  avatar: ImageSourcePropType;
-};
+const BACKGROUND_NOISE_TILE = 36;
+const BACKGROUND_NOISE_MINT = createNoisePath(
+  36,
+  0x4b7a21,
+  -0.08,
+  BACKGROUND_NOISE_TILE,
+  BACKGROUND_NOISE_TILE,
+);
+const BACKGROUND_NOISE_LIGHT = createNoisePath(
+  24,
+  0xf8e4c2,
+  -0.16,
+  BACKGROUND_NOISE_TILE,
+  BACKGROUND_NOISE_TILE,
+);
 
 const fallbackAvatar = require("./assets/people/mark.png");
+const transparentDrinkImage = {
+  uri: "data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=",
+} as ImageSourcePropType;
+
+function normalizedDrinkName(name: string) {
+  return name.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+const localDrinkArtworkAliases: Record<string, string> = {
+  "coca-cola-original-taste": "coke",
+  "heineken-original": "heineken",
+  "original-7up": "sevenup",
+  "birra-moretti-l-autentica": "birra",
+  "whispering-angel-rose": "rose",
+};
+
+function localDrinkImageForName(name: string, databaseId?: string) {
+  if (databaseId && catalogueImages[databaseId]) {
+    return catalogueImages[databaseId];
+  }
+  const aliasedDrinkId = databaseId
+    ? localDrinkArtworkAliases[databaseId]
+    : undefined;
+  if (aliasedDrinkId) {
+    return drinks.find((drink) => drink.id === aliasedDrinkId)?.image;
+  }
+  const normalized = normalizedDrinkName(name);
+  return drinks.find((drink) => normalizedDrinkName(drink.name) === normalized)
+    ?.image;
+}
 
 function typeColor(category: string) {
   const normalized = category.toLowerCase();
@@ -209,12 +224,17 @@ function typeColor(category: string) {
 }
 
 function beverageFromDatabase(beverage: DatabaseBeverage): Drink {
+  const localImage = localDrinkImageForName(beverage.name, beverage.id);
   return {
     id: beverage.id,
     name: beverage.name,
     type: beverage.category,
     typeColor: typeColor(beverage.category),
-    image: beverage.image_url ? { uri: beverage.image_url } : fallbackAvatar,
+    image:
+      localImage ||
+      (beverage.image_url
+        ? { uri: beverage.image_url }
+        : transparentDrinkImage),
     rating: Number(beverage.average_rating || 0),
     reviewCount: beverage.review_count || 0,
     tags: beverage.official_tags || [],
@@ -277,1584 +297,6 @@ function commentFromDatabase(comment: DatabaseComment): ReviewComment {
     }),
   };
 }
-type Screen =
-  | "splash"
-  | "explore"
-  | "search"
-  | "request"
-  | "drinklist"
-  | "drink"
-  | "profile"
-  | "userProfile"
-  | "settings"
-  | "review"
-  | "reviewDetail"
-  | "feed";
-
-const coreDrinks: Drink[] = [
-  {
-    id: "aperol",
-    name: "Aperol Spritz",
-    type: "Cocktail",
-    typeColor: "#aa0cac",
-    rating: 4.1,
-    tags: ["Citrus", "Refreshing"],
-    origin: "Italy",
-    brand: "Aperol",
-    description:
-      "Aperol Spritz is a bright and bubbly Italian cocktail, perfect for sunny afternoons. It's a refreshing mix of bittersweet flavors that instantly lifts your spirits.",
-    image: require("./assets/drinks/aperol.png"),
-  },
-  {
-    id: "sprite",
-    name: "Sprite",
-    type: "Soft Drink",
-    typeColor: "#2903c0",
-    rating: 3.8,
-    tags: ["Refreshing", "Fizzy"],
-    description:
-      "A crisp lemon-lime soft drink with a clean, refreshing finish.",
-    image: require("./assets/drinks/sprite.png"),
-  },
-  {
-    id: "coke",
-    name: "Coca-Cola",
-    type: "Soft Drink",
-    typeColor: "#2903c0",
-    rating: 4.0,
-    tags: ["Fizzy", "Sweet"],
-    description:
-      "The unmistakable sparkling cola with caramel and citrus notes.",
-    image: require("./assets/drinks/coca-cola.png"),
-  },
-  {
-    id: "heineken",
-    name: "Heineken",
-    type: "Beer",
-    typeColor: "#84791b",
-    rating: 4.0,
-    tags: ["Mild", "Crisp"],
-    description: "A balanced pale lager with a subtly bitter finish.",
-    image: require("./assets/drinks/heineken.png"),
-  },
-  {
-    id: "pilsner",
-    name: "Pilsner Urquell",
-    type: "Beer",
-    typeColor: "#84791b",
-    rating: 4.5,
-    tags: ["Crisp", "Bitter"],
-    description: "The original golden pilsner with a floral hop aroma.",
-    image: require("./assets/drinks/pilsner.png"),
-  },
-  {
-    id: "margarita",
-    name: "Margarita",
-    type: "Cocktail",
-    typeColor: "#aa0cac",
-    rating: 4.2,
-    tags: ["Citrusy", "Tangy"],
-    description: "Tequila, lime and orange liqueur served bright and cold.",
-    image: require("./assets/drinks/margarita.png"),
-  },
-  {
-    id: "hophouse",
-    name: "Hop House Lager",
-    type: "Beer",
-    typeColor: "#84791b",
-    rating: 4.3,
-    tags: ["Mild", "Bitter"],
-    description: "A double-hopped lager with a crisp, aromatic profile.",
-    image: require("./assets/drinks/hop-house.png"),
-  },
-  {
-    id: "guinness",
-    name: "Guinness Draught",
-    type: "Beer",
-    typeColor: "#84791b",
-    rating: 4.6,
-    tags: ["Creamy", "Roasted"],
-    description: "Iconic stout with roasted notes and a smooth creamy head.",
-    image: require("./assets/drinks/guinness.png"),
-  },
-  {
-    id: "petrus",
-    name: "Château Petrus",
-    type: "Wine",
-    typeColor: "#9c0000",
-    rating: 4.9,
-    tags: ["Dry", "Rich"],
-    origin: "France",
-    brand: "Petrus",
-    description:
-      "A celebrated Pomerol with plush dark fruit and a long, elegant finish.",
-    image: require("./assets/drinks/petrus.png"),
-  },
-  {
-    id: "birra",
-    name: "Birra Moretti",
-    type: "Beer",
-    typeColor: "#84791b",
-    rating: 5,
-    tags: ["Crisp", "Balanced"],
-    description: "A traditionally brewed Italian lager.",
-    image: require("./assets/drinks/birra.png"),
-  },
-  {
-    id: "sevenup",
-    name: "7 Up",
-    type: "Soft Drink",
-    typeColor: "#2903c0",
-    rating: 3.7,
-    tags: ["Citrus", "Fizzy"],
-    description: "A light lemon-lime soda with an upbeat, sparkling finish.",
-    image: require("./assets/drinks/seven-up.png"),
-  },
-  {
-    id: "cosmo",
-    name: "Cosmopolitan",
-    type: "Cocktail",
-    typeColor: "#aa0cac",
-    rating: 4.2,
-    tags: ["Tarty", "Fruity"],
-    description: "A bright cranberry and citrus cocktail.",
-    image: require("./assets/drinks/cosmopolitan.png"),
-  },
-  {
-    id: "espresso",
-    name: "Espresso Martini",
-    type: "Cocktail",
-    typeColor: "#aa0cac",
-    rating: 4.7,
-    tags: ["Strong", "Coffee"],
-    description: "A rich, chilled combination of espresso and vodka.",
-    image: require("./assets/drinks/espresso-martini.png"),
-  },
-  {
-    id: "rose",
-    name: "Whispering Angel",
-    type: "Wine",
-    typeColor: "#9c0000",
-    rating: 4.4,
-    tags: ["Dry", "Floral"],
-    description: "Elegant Provence rosé with delicate fruit notes.",
-    image: require("./assets/drinks/whispering-angel.png"),
-  },
-  {
-    id: "cortado",
-    name: "Cortado",
-    type: "Coffee",
-    typeColor: "#a4600d",
-    rating: 4.5,
-    tags: ["Creamy", "Strong"],
-    description: "Equal parts espresso and warm steamed milk.",
-    image: require("./assets/drinks/cortado.png"),
-  },
-  {
-    id: "matcha",
-    name: "White Choc Matcha",
-    type: "Tea Latte",
-    typeColor: "#7cb100",
-    rating: 4.3,
-    tags: ["Creamy", "Sweet"],
-    description: "Ceremonial matcha softened with white chocolate.",
-    image: require("./assets/drinks/matcha.png"),
-  },
-];
-
-type AdditionalDrinkSeed = Drink & {
-  totalReviews: number;
-  review: Omit<Review, "id" | "drinkId" | "avatar">;
-};
-
-const reviewAuthors: Record<string, ImageSourcePropType> = {
-  "Gabby Romero": require("./assets/people/gabby.png"),
-  "Liam Harper": require("./assets/people/liam.png"),
-  "Sarah James": require("./assets/people/sarah.png"),
-  "James Kent": require("./assets/people/james.png"),
-  "Jaques Dane": require("./assets/people/jaques.png"),
-  "Liddy Powell": require("./assets/people/liddy.png"),
-  "Mark Kelly": require("./assets/people/mark.png"),
-};
-
-const additionalDrinkSeeds: AdditionalDrinkSeed[] = [
-  // Soft drinks
-  {
-    id: "fanta-orange",
-    name: "Fanta Orange",
-    type: "Soft Drink",
-    typeColor: "#2903c0",
-    image: require("./assets/drinks/catalog/fanta-orange.png"),
-    rating: 4.1,
-    tags: ["Orange", "Fizzy", "Sweet"],
-    origin: "Italy",
-    brand: "Fanta",
-    description:
-      "A lively orange soda with bright citrus sweetness and a playful sparkling finish.",
-    totalReviews: 73,
-    review: {
-      user: "Sarah James",
-      rating: 4,
-      text: "Big orange aroma, lots of bubbles and a nostalgic candy-like finish. Best over ice when you want something unapologetically sweet.",
-      tags: ["Orange", "Fizzy"],
-      date: "19 Jul 2026",
-      likes: 14,
-      comments: 3,
-    },
-  },
-  {
-    id: "dr-pepper",
-    name: "Dr Pepper",
-    type: "Soft Drink",
-    typeColor: "#2903c0",
-    image: require("./assets/drinks/catalog/dr-pepper.png"),
-    rating: 4.2,
-    tags: ["Cherry", "Spiced", "Sweet"],
-    origin: "United States",
-    brand: "Dr Pepper",
-    description:
-      "A distinctive dark soda blending cherry, warm spice and caramel-like sweetness.",
-    totalReviews: 96,
-    review: {
-      user: "James Kent",
-      rating: 4.5,
-      text: "Cherry is the first thing I notice, followed by vanilla and a curious peppery warmth. More complex than a standard cola.",
-      tags: ["Cherry", "Spiced"],
-      date: "18 Jul 2026",
-      likes: 21,
-      comments: 5,
-    },
-  },
-  {
-    id: "sanpellegrino-limonata",
-    name: "S.Pellegrino Limonata",
-    type: "Soft Drink",
-    typeColor: "#2903c0",
-    image: require("./assets/drinks/catalog/sanpellegrino-limonata.png"),
-    rating: 4.4,
-    tags: ["Lemon", "Tart", "Refreshing"],
-    origin: "Italy",
-    brand: "S.Pellegrino",
-    description:
-      "Sparkling Italian lemon drink with real citrus character and a pleasantly tart edge.",
-    totalReviews: 58,
-    review: {
-      user: "Gabby Romero",
-      rating: 4.5,
-      text: "Proper lemon sharpness rather than just lemon candy. The fine bubbles and slightly bitter peel note keep it refreshing.",
-      tags: ["Lemon", "Tart"],
-      date: "17 Jul 2026",
-      likes: 18,
-      comments: 4,
-    },
-  },
-  {
-    id: "club-mate",
-    name: "Club-Mate",
-    type: "Soft Drink",
-    typeColor: "#2903c0",
-    image: require("./assets/drinks/catalog/club-mate.png"),
-    rating: 3.9,
-    tags: ["Herbal", "Dry", "Caffeinated"],
-    origin: "Germany",
-    brand: "Club-Mate",
-    description:
-      "A caffeinated sparkling yerba mate drink with herbal depth and restrained sweetness.",
-    totalReviews: 41,
-    review: {
-      user: "Liam Harper",
-      rating: 4,
-      text: "Unusual at first: dry, grassy and gently smoky. Once it is ice cold, the herbal bitterness becomes very moreish.",
-      tags: ["Herbal", "Dry"],
-      date: "16 Jul 2026",
-      likes: 9,
-      comments: 2,
-    },
-  },
-  {
-    id: "irn-bru",
-    name: "Irn-Bru",
-    type: "Soft Drink",
-    typeColor: "#2903c0",
-    image: require("./assets/drinks/catalog/irn-bru.png"),
-    rating: 4,
-    tags: ["Citrus", "Bubblegum", "Fizzy"],
-    origin: "Scotland",
-    brand: "A.G. Barr",
-    description:
-      "A vivid Scottish soft drink with citrus, vanilla and bubblegum-like flavour notes.",
-    totalReviews: 82,
-    review: {
-      user: "Mark Kelly",
-      rating: 4,
-      text: "Almost impossible to describe: orange citrus, cream soda and bubblegum all at once. Weird in the best possible way.",
-      tags: ["Bubblegum", "Fizzy"],
-      date: "15 Jul 2026",
-      likes: 17,
-      comments: 6,
-    },
-  },
-
-  // Beers
-  {
-    id: "sierra-nevada-pale-ale",
-    name: "Sierra Nevada Pale Ale",
-    type: "Beer",
-    typeColor: "#84791b",
-    image: require("./assets/drinks/catalog/sierra-nevada-pale-ale.png"),
-    rating: 4.6,
-    tags: ["Piney", "Citrus", "Bitter"],
-    origin: "United States",
-    brand: "Sierra Nevada",
-    description:
-      "A classic American pale ale with grapefruit, pine and a firm caramel malt backbone.",
-    totalReviews: 118,
-    review: {
-      user: "Liam Harper",
-      rating: 4.5,
-      text: "A benchmark pale ale. Grapefruit and pine lead the way, with enough caramel malt to keep the finish balanced.",
-      tags: ["Piney", "Bitter"],
-      date: "14 Jul 2026",
-      likes: 25,
-      comments: 7,
-    },
-  },
-  {
-    id: "peroni",
-    name: "Peroni Nastro Azzurro",
-    type: "Beer",
-    typeColor: "#84791b",
-    image: require("./assets/drinks/catalog/peroni.png"),
-    rating: 4.1,
-    tags: ["Crisp", "Light", "Dry"],
-    origin: "Italy",
-    brand: "Peroni",
-    description:
-      "A clean Italian lager with delicate grain, light floral hops and a dry finish.",
-    totalReviews: 104,
-    review: {
-      user: "Jaques Dane",
-      rating: 4,
-      text: "Very clean and light with a tidy dry finish. Nothing loud here, just a crisp lager that works brilliantly with food.",
-      tags: ["Crisp", "Dry"],
-      date: "13 Jul 2026",
-      likes: 13,
-      comments: 2,
-    },
-  },
-  {
-    id: "punk-ipa",
-    name: "Punk IPA",
-    type: "Beer",
-    typeColor: "#84791b",
-    image: require("./assets/drinks/catalog/punk-ipa.png"),
-    rating: 4.3,
-    tags: ["Tropical", "Hoppy", "Bitter"],
-    origin: "Scotland",
-    brand: "BrewDog",
-    description:
-      "A modern IPA packed with tropical fruit, citrus hops and a punchy bitter finish.",
-    totalReviews: 137,
-    review: {
-      user: "Mark Kelly",
-      rating: 4.5,
-      text: "Loads of grapefruit and tropical fruit before the hops snap into a long bitter finish. Bold but still easy to drink.",
-      tags: ["Tropical", "Hoppy"],
-      date: "12 Jul 2026",
-      likes: 22,
-      comments: 5,
-    },
-  },
-  {
-    id: "corona-extra",
-    name: "Corona Extra",
-    type: "Beer",
-    typeColor: "#84791b",
-    image: require("./assets/drinks/catalog/corona-extra.png"),
-    rating: 3.9,
-    tags: ["Light", "Crisp", "Citrus"],
-    origin: "Mexico",
-    brand: "Corona",
-    description:
-      "A light-bodied Mexican lager known for its mellow grain and refreshing citrus pairing.",
-    totalReviews: 156,
-    review: {
-      user: "Sarah James",
-      rating: 4,
-      text: "Soft grain, gentle bitterness and very refreshing with lime. It is simple, sunny and at its best straight from an ice bucket.",
-      tags: ["Light", "Citrus"],
-      date: "11 Jul 2026",
-      likes: 19,
-      comments: 4,
-    },
-  },
-  {
-    id: "asahi-super-dry",
-    name: "Asahi Super Dry",
-    type: "Beer",
-    typeColor: "#84791b",
-    image: require("./assets/drinks/catalog/asahi-super-dry.png"),
-    rating: 4.4,
-    tags: ["Dry", "Crisp", "Clean"],
-    origin: "Japan",
-    brand: "Asahi",
-    description:
-      "A sharp, highly attenuated Japanese lager with a clean palate and quick dry finish.",
-    totalReviews: 89,
-    review: {
-      user: "James Kent",
-      rating: 4.5,
-      text: "Exceptionally clean with a brisk carbonation and almost no lingering sweetness. The dry finish makes the next sip inevitable.",
-      tags: ["Dry", "Clean"],
-      date: "10 Jul 2026",
-      likes: 16,
-      comments: 3,
-    },
-  },
-
-  // Cocktails
-  {
-    id: "mojito",
-    name: "Mojito",
-    type: "Cocktail",
-    typeColor: "#aa0cac",
-    image: require("./assets/drinks/catalog/mojito.png"),
-    rating: 4.5,
-    tags: ["Minty", "Citrus", "Refreshing"],
-    origin: "Cuba",
-    brand: "Classic Cocktail",
-    description:
-      "White rum, fresh lime, mint, sugar and soda built into a cool, aromatic highball.",
-    totalReviews: 124,
-    review: {
-      user: "Gabby Romero",
-      rating: 4.5,
-      text: "Fresh mint and lime make this incredibly bright. The rum is present without overpowering the sparkling, cooling finish.",
-      tags: ["Minty", "Refreshing"],
-      date: "9 Jul 2026",
-      likes: 28,
-      comments: 8,
-    },
-  },
-  {
-    id: "negroni",
-    name: "Negroni",
-    type: "Cocktail",
-    typeColor: "#aa0cac",
-    image: require("./assets/drinks/catalog/negroni.png"),
-    rating: 4.6,
-    tags: ["Bitter", "Orange", "Herbal"],
-    origin: "Italy",
-    brand: "Classic Cocktail",
-    description:
-      "Equal parts gin, sweet vermouth and bitter aperitivo with a fragrant orange twist.",
-    totalReviews: 111,
-    review: {
-      user: "Liddy Powell",
-      rating: 5,
-      text: "Bitter orange, dark herbs and a warm gin backbone. It starts assertive and becomes beautifully silky as the ice melts.",
-      tags: ["Bitter", "Herbal"],
-      date: "8 Jul 2026",
-      likes: 33,
-      comments: 9,
-    },
-  },
-  {
-    id: "old-fashioned",
-    name: "Old Fashioned",
-    type: "Cocktail",
-    typeColor: "#aa0cac",
-    image: require("./assets/drinks/catalog/old-fashioned.png"),
-    rating: 4.7,
-    tags: ["Bourbon", "Orange", "Rich"],
-    origin: "United States",
-    brand: "Classic Cocktail",
-    description:
-      "Whiskey gently sweetened and seasoned with aromatic bitters, served over a large cube.",
-    totalReviews: 132,
-    review: {
-      user: "Mark Kelly",
-      rating: 5,
-      text: "Rich bourbon, orange oil and aromatic spice with exactly enough sweetness. A slow drink that rewards every minute in the glass.",
-      tags: ["Bourbon", "Rich"],
-      date: "7 Jul 2026",
-      likes: 36,
-      comments: 10,
-    },
-  },
-  {
-    id: "paloma",
-    name: "Paloma",
-    type: "Cocktail",
-    typeColor: "#aa0cac",
-    image: require("./assets/drinks/catalog/paloma.png"),
-    rating: 4.4,
-    tags: ["Grapefruit", "Tangy", "Fizzy"],
-    origin: "Mexico",
-    brand: "Classic Cocktail",
-    description:
-      "Tequila, grapefruit and lime topped with soda for a tart, lightly saline refresher.",
-    totalReviews: 77,
-    review: {
-      user: "Sarah James",
-      rating: 4.5,
-      text: "Juicy grapefruit and lime make the tequila taste bright rather than heavy. A tiny salty note gives the finish real lift.",
-      tags: ["Grapefruit", "Tangy"],
-      date: "6 Jul 2026",
-      likes: 20,
-      comments: 4,
-    },
-  },
-  {
-    id: "french-75",
-    name: "French 75",
-    type: "Cocktail",
-    typeColor: "#aa0cac",
-    image: require("./assets/drinks/catalog/french-75.png"),
-    rating: 4.5,
-    tags: ["Lemon", "Sparkling", "Dry"],
-    origin: "France",
-    brand: "Classic Cocktail",
-    description:
-      "Gin, lemon and sugar lengthened with sparkling wine for an elegant, lively drink.",
-    totalReviews: 69,
-    review: {
-      user: "Gabby Romero",
-      rating: 4.5,
-      text: "The lemon and gin give it structure while the sparkling wine keeps everything celebratory. Crisp, dry and dangerously easy.",
-      tags: ["Lemon", "Sparkling"],
-      date: "5 Jul 2026",
-      likes: 24,
-      comments: 6,
-    },
-  },
-
-  // Wines
-  {
-    id: "cloudy-bay-sauvignon",
-    name: "Cloudy Bay Sauvignon Blanc",
-    type: "Wine",
-    typeColor: "#9c0000",
-    image: require("./assets/drinks/catalog/cloudy-bay-sauvignon.png"),
-    rating: 4.6,
-    tags: ["Tropical", "Crisp", "Herbal"],
-    origin: "New Zealand",
-    brand: "Cloudy Bay",
-    description:
-      "Vibrant Marlborough Sauvignon Blanc with passionfruit, citrus and a fresh herbal edge.",
-    totalReviews: 86,
-    review: {
-      user: "Liddy Powell",
-      rating: 4.5,
-      text: "Passionfruit and lime jump from the glass, followed by a fresh green-herb note. Bright acidity keeps it precise.",
-      tags: ["Tropical", "Crisp"],
-      date: "4 Jul 2026",
-      likes: 19,
-      comments: 4,
-    },
-  },
-  {
-    id: "rioja-reserva",
-    name: "Rioja Reserva",
-    type: "Wine",
-    typeColor: "#9c0000",
-    image: require("./assets/drinks/catalog/rioja-reserva.png"),
-    rating: 4.5,
-    tags: ["Cherry", "Vanilla", "Oaky"],
-    origin: "Spain",
-    brand: "Marqués de Reserva",
-    description:
-      "Mature Tempranillo with red cherry, vanilla, leather and polished oak spice.",
-    totalReviews: 74,
-    review: {
-      user: "James Kent",
-      rating: 4.5,
-      text: "Ripe cherry meets vanilla and cedar, with soft tannins that make it feel already settled. Excellent with grilled food.",
-      tags: ["Cherry", "Oaky"],
-      date: "3 Jul 2026",
-      likes: 17,
-      comments: 3,
-    },
-  },
-  {
-    id: "barolo",
-    name: "Barolo",
-    type: "Wine",
-    typeColor: "#9c0000",
-    image: require("./assets/drinks/catalog/barolo.png"),
-    rating: 4.8,
-    tags: ["Rose", "Tannic", "Earthy"],
-    origin: "Italy",
-    brand: "Piedmont Selection",
-    description:
-      "Structured Nebbiolo showing rose, red fruit, earth and a long, finely tannic finish.",
-    totalReviews: 63,
-    review: {
-      user: "Gabby Romero",
-      rating: 5,
-      text: "Perfumed with rose and cherry, then earthy and seriously structured on the palate. The finish seems to last for minutes.",
-      tags: ["Rose", "Tannic"],
-      date: "2 Jul 2026",
-      likes: 29,
-      comments: 7,
-    },
-  },
-  {
-    id: "sancerre",
-    name: "Sancerre",
-    type: "Wine",
-    typeColor: "#9c0000",
-    image: require("./assets/drinks/catalog/sancerre.png"),
-    rating: 4.4,
-    tags: ["Mineral", "Citrus", "Dry"],
-    origin: "France",
-    brand: "Loire Valley Selection",
-    description:
-      "Dry Loire Sauvignon Blanc with lemon, white flowers and a clean flinty mineral note.",
-    totalReviews: 57,
-    review: {
-      user: "Sarah James",
-      rating: 4.5,
-      text: "Lemon peel, white flowers and a distinctly stony finish. Lean and refreshing, but not short on personality.",
-      tags: ["Mineral", "Dry"],
-      date: "1 Jul 2026",
-      likes: 15,
-      comments: 2,
-    },
-  },
-  {
-    id: "mendoza-malbec",
-    name: "Mendoza Malbec",
-    type: "Wine",
-    typeColor: "#9c0000",
-    image: require("./assets/drinks/catalog/mendoza-malbec.png"),
-    rating: 4.5,
-    tags: ["Plum", "Cocoa", "Full-bodied"],
-    origin: "Argentina",
-    brand: "Andes Estate",
-    description:
-      "Generous high-altitude Malbec with plum, blackberry, cocoa and smooth rounded tannins.",
-    totalReviews: 92,
-    review: {
-      user: "Mark Kelly",
-      rating: 4.5,
-      text: "Dark plum and blackberry with a cocoa note that works beautifully beside steak. Full-bodied without feeling rough.",
-      tags: ["Plum", "Cocoa"],
-      date: "30 Jun 2026",
-      likes: 23,
-      comments: 5,
-    },
-  },
-
-  // Coffees
-  {
-    id: "flat-white",
-    name: "Flat White",
-    type: "Coffee",
-    typeColor: "#a4600d",
-    image: require("./assets/drinks/catalog/flat-white.png"),
-    rating: 4.7,
-    tags: ["Velvety", "Strong", "Milky"],
-    origin: "Australia / New Zealand",
-    brand: "Coffeehouse Classic",
-    description:
-      "Double espresso folded through finely textured milk for a strong, velvety cup.",
-    totalReviews: 143,
-    review: {
-      user: "Liam Harper",
-      rating: 5,
-      text: "Silky microfoam with enough espresso to stay bold all the way through. Richer than a latte and beautifully balanced.",
-      tags: ["Velvety", "Strong"],
-      date: "29 Jun 2026",
-      likes: 31,
-      comments: 8,
-    },
-  },
-  {
-    id: "cold-brew",
-    name: "Cold Brew",
-    type: "Coffee",
-    typeColor: "#a4600d",
-    image: require("./assets/drinks/catalog/cold-brew.png"),
-    rating: 4.4,
-    tags: ["Smooth", "Chocolate", "Cold"],
-    origin: "Japan",
-    brand: "Slow Steep",
-    description:
-      "Coffee extracted slowly in cold water for a smooth body and low-acid chocolate notes.",
-    totalReviews: 121,
-    review: {
-      user: "Sarah James",
-      rating: 4.5,
-      text: "Smooth and chocolatey with none of the sharpness hot coffee can have. Clean enough to drink without milk or sugar.",
-      tags: ["Smooth", "Chocolate"],
-      date: "28 Jun 2026",
-      likes: 26,
-      comments: 6,
-    },
-  },
-  {
-    id: "cappuccino",
-    name: "Cappuccino",
-    type: "Coffee",
-    typeColor: "#a4600d",
-    image: require("./assets/drinks/catalog/cappuccino.png"),
-    rating: 4.5,
-    tags: ["Foamy", "Roasted", "Creamy"],
-    origin: "Italy",
-    brand: "Coffeehouse Classic",
-    description:
-      "Espresso balanced with steamed milk and a generous cap of airy microfoam.",
-    totalReviews: 164,
-    review: {
-      user: "Gabby Romero",
-      rating: 4.5,
-      text: "A deep roasted espresso under a cloud of fine, sweet foam. The proportions make every sip feel light and rich together.",
-      tags: ["Foamy", "Roasted"],
-      date: "27 Jun 2026",
-      likes: 22,
-      comments: 4,
-    },
-  },
-  {
-    id: "iced-americano",
-    name: "Iced Americano",
-    type: "Coffee",
-    typeColor: "#a4600d",
-    image: require("./assets/drinks/catalog/iced-americano.png"),
-    rating: 4.2,
-    tags: ["Bold", "Clean", "Refreshing"],
-    origin: "United States",
-    brand: "Coffeehouse Classic",
-    description:
-      "Espresso lengthened with cold water and ice for a bold but clean chilled coffee.",
-    totalReviews: 98,
-    review: {
-      user: "James Kent",
-      rating: 4,
-      text: "Direct, dark and refreshing. The melting ice softens the espresso gradually without turning it milky or sweet.",
-      tags: ["Bold", "Clean"],
-      date: "26 Jun 2026",
-      likes: 12,
-      comments: 2,
-    },
-  },
-  {
-    id: "mocha",
-    name: "Caffè Mocha",
-    type: "Coffee",
-    typeColor: "#a4600d",
-    image: require("./assets/drinks/catalog/mocha.png"),
-    rating: 4.3,
-    tags: ["Chocolate", "Creamy", "Sweet"],
-    origin: "Italy / United States",
-    brand: "Coffeehouse Classic",
-    description:
-      "Espresso and steamed milk enriched with chocolate for a comforting dessert-like coffee.",
-    totalReviews: 116,
-    review: {
-      user: "Liddy Powell",
-      rating: 4.5,
-      text: "Dark chocolate and espresso keep each other in check. Sweet and creamy, but with enough roast to feel like coffee rather than pudding.",
-      tags: ["Chocolate", "Creamy"],
-      date: "25 Jun 2026",
-      likes: 20,
-      comments: 5,
-    },
-  },
-
-  // Teas
-  {
-    id: "earl-grey",
-    name: "Earl Grey",
-    type: "Tea",
-    typeColor: "#7cb100",
-    image: require("./assets/drinks/catalog/earl-grey.png"),
-    rating: 4.3,
-    tags: ["Bergamot", "Floral", "Citrus"],
-    origin: "United Kingdom",
-    brand: "Classic Tea",
-    description:
-      "Black tea scented with fragrant bergamot oil for a brisk, floral citrus cup.",
-    totalReviews: 79,
-    review: {
-      user: "Sarah James",
-      rating: 4.5,
-      text: "Brisk black tea with a clear bergamot perfume. Floral and citrusy without tasting like fragrance when brewed gently.",
-      tags: ["Bergamot", "Floral"],
-      date: "24 Jun 2026",
-      likes: 18,
-      comments: 3,
-    },
-  },
-  {
-    id: "masala-chai",
-    name: "Masala Chai",
-    type: "Tea",
-    typeColor: "#7cb100",
-    image: require("./assets/drinks/catalog/masala-chai.png"),
-    rating: 4.7,
-    tags: ["Spiced", "Milky", "Warming"],
-    origin: "India",
-    brand: "House Chai",
-    description:
-      "Black tea simmered with milk, ginger, cardamom, cinnamon and warming aromatic spices.",
-    totalReviews: 105,
-    review: {
-      user: "Gabby Romero",
-      rating: 5,
-      text: "Cardamom and ginger lead, then cinnamon and sweet milk round everything out. Deeply aromatic and genuinely warming.",
-      tags: ["Spiced", "Warming"],
-      date: "23 Jun 2026",
-      likes: 30,
-      comments: 7,
-    },
-  },
-  {
-    id: "jasmine-green-tea",
-    name: "Jasmine Green Tea",
-    type: "Tea",
-    typeColor: "#7cb100",
-    image: require("./assets/drinks/catalog/jasmine-green-tea.png"),
-    rating: 4.4,
-    tags: ["Floral", "Delicate", "Fresh"],
-    origin: "China",
-    brand: "Jasmine Garden",
-    description:
-      "Green tea naturally scented with jasmine blossoms for a soft, clean and floral infusion.",
-    totalReviews: 67,
-    review: {
-      user: "Liddy Powell",
-      rating: 4.5,
-      text: "Fresh green tea underneath a gentle jasmine aroma. Delicate, clean and never bitter when the water is not too hot.",
-      tags: ["Floral", "Delicate"],
-      date: "22 Jun 2026",
-      likes: 16,
-      comments: 2,
-    },
-  },
-  {
-    id: "peach-iced-tea",
-    name: "Peach Iced Tea",
-    type: "Tea",
-    typeColor: "#7cb100",
-    image: require("./assets/drinks/catalog/peach-iced-tea.png"),
-    rating: 4.2,
-    tags: ["Peach", "Fruity", "Refreshing"],
-    origin: "United States",
-    brand: "Summer Brew",
-    description:
-      "Chilled black tea with ripe peach flavour and a smooth, lightly sweet finish.",
-    totalReviews: 88,
-    review: {
-      user: "Mark Kelly",
-      rating: 4,
-      text: "Ripe peach comes first, but there is enough tea tannin underneath to stop it becoming syrupy. Very good over lots of ice.",
-      tags: ["Peach", "Refreshing"],
-      date: "21 Jun 2026",
-      likes: 14,
-      comments: 3,
-    },
-  },
-  {
-    id: "genmaicha",
-    name: "Genmaicha",
-    type: "Tea",
-    typeColor: "#7cb100",
-    image: require("./assets/drinks/catalog/genmaicha.png"),
-    rating: 4.5,
-    tags: ["Toasted", "Grassy", "Nutty"],
-    origin: "Japan",
-    brand: "Kyoto Tea House",
-    description:
-      "Japanese green tea blended with roasted rice for a grassy, nutty and comforting cup.",
-    totalReviews: 54,
-    review: {
-      user: "Liam Harper",
-      rating: 4.5,
-      text: "The roasted rice smells like warm popcorn, while the green tea stays fresh and grassy. Comforting and surprisingly savoury.",
-      tags: ["Toasted", "Nutty"],
-      date: "20 Jun 2026",
-      likes: 17,
-      comments: 4,
-    },
-  },
-
-  // Whiskeys
-  {
-    id: "jameson",
-    name: "Jameson Irish Whiskey",
-    type: "Whiskey",
-    typeColor: "#8a4f16",
-    image: require("./assets/drinks/catalog/jameson.png"),
-    rating: 4.4,
-    tags: ["Smooth", "Vanilla", "Spiced"],
-    origin: "Ireland",
-    brand: "Jameson",
-    description:
-      "Triple-distilled Irish whiskey with orchard fruit, vanilla and a gentle spicy finish.",
-    totalReviews: 147,
-    review: {
-      user: "Mark Kelly",
-      rating: 4.5,
-      text: "Soft vanilla and apple with a gentle pepper note at the end. Approachable neat and still distinctive in a highball.",
-      tags: ["Smooth", "Vanilla"],
-      date: "19 Jun 2026",
-      likes: 27,
-      comments: 6,
-    },
-  },
-  {
-    id: "glenfiddich-12",
-    name: "Glenfiddich 12",
-    type: "Whiskey",
-    typeColor: "#8a4f16",
-    image: require("./assets/drinks/catalog/glenfiddich-12.png"),
-    rating: 4.5,
-    tags: ["Pear", "Oaky", "Fresh"],
-    origin: "Scotland",
-    brand: "Glenfiddich",
-    description:
-      "Speyside single malt showing fresh pear, light oak and a clean, gently malty finish.",
-    totalReviews: 101,
-    review: {
-      user: "James Kent",
-      rating: 4.5,
-      text: "Fresh pear and cereal sweetness make the opening very friendly. Light oak and malt appear on the clean finish.",
-      tags: ["Pear", "Oaky"],
-      date: "18 Jun 2026",
-      likes: 19,
-      comments: 4,
-    },
-  },
-  {
-    id: "makers-mark",
-    name: "Maker's Mark",
-    type: "Whiskey",
-    typeColor: "#8a4f16",
-    image: require("./assets/drinks/catalog/makers-mark.png"),
-    rating: 4.5,
-    tags: ["Caramel", "Vanilla", "Warming"],
-    origin: "United States",
-    brand: "Maker's Mark",
-    description:
-      "Wheated Kentucky bourbon with caramel, vanilla, sweet oak and a rounded warming finish.",
-    totalReviews: 113,
-    review: {
-      user: "Liam Harper",
-      rating: 4.5,
-      text: "Caramel and vanilla are generous, but the soft wheat character keeps the heat rounded. Excellent in an Old Fashioned.",
-      tags: ["Caramel", "Warming"],
-      date: "17 Jun 2026",
-      likes: 22,
-      comments: 5,
-    },
-  },
-  {
-    id: "nikka-from-the-barrel",
-    name: "Nikka From the Barrel",
-    type: "Whiskey",
-    typeColor: "#8a4f16",
-    image: require("./assets/drinks/catalog/nikka-from-the-barrel.png"),
-    rating: 4.8,
-    tags: ["Rich", "Spiced", "Orange"],
-    origin: "Japan",
-    brand: "Nikka",
-    description:
-      "A concentrated Japanese blend with orange peel, baking spice, oak and a powerful silky body.",
-    totalReviews: 76,
-    review: {
-      user: "Liddy Powell",
-      rating: 5,
-      text: "Concentrated orange peel, clove and polished oak. Powerful, but a few drops of water reveal a wonderfully silky texture.",
-      tags: ["Rich", "Spiced"],
-      date: "16 Jun 2026",
-      likes: 34,
-      comments: 9,
-    },
-  },
-  {
-    id: "redbreast-12",
-    name: "Redbreast 12",
-    type: "Whiskey",
-    typeColor: "#8a4f16",
-    image: require("./assets/drinks/catalog/redbreast-12.png"),
-    rating: 4.9,
-    tags: ["Dried Fruit", "Nutty", "Creamy"],
-    origin: "Ireland",
-    brand: "Redbreast",
-    description:
-      "Single pot still Irish whiskey layered with dried fruit, toasted nuts and creamy spice.",
-    totalReviews: 84,
-    review: {
-      user: "Mark Kelly",
-      rating: 5,
-      text: "Dried fruit, toasted nuts and creamy spice arrive in layers. Rich without heaviness and exceptionally long on the finish.",
-      tags: ["Dried Fruit", "Creamy"],
-      date: "15 Jun 2026",
-      likes: 38,
-      comments: 10,
-    },
-  },
-
-  // Other drinks
-  {
-    id: "ginger-lemon-kombucha",
-    name: "Ginger Lemon Kombucha",
-    type: "Kombucha",
-    typeColor: "#116d65",
-    image: require("./assets/drinks/catalog/ginger-lemon-kombucha.png"),
-    rating: 4.2,
-    tags: ["Tangy", "Ginger", "Fizzy"],
-    origin: "United States",
-    brand: "Wild Culture",
-    description:
-      "Fermented tea sharpened with fresh ginger and lemon for a tangy, naturally sparkling drink.",
-    totalReviews: 62,
-    review: {
-      user: "Sarah James",
-      rating: 4,
-      text: "A lively fermented tang followed by lemon and a real ginger prickle. Dry enough to stay refreshing rather than juice-like.",
-      tags: ["Tangy", "Ginger"],
-      date: "14 Jun 2026",
-      likes: 15,
-      comments: 3,
-    },
-  },
-  {
-    id: "mango-lassi",
-    name: "Mango Lassi",
-    type: "Yogurt Drink",
-    typeColor: "#116d65",
-    image: require("./assets/drinks/catalog/mango-lassi.png"),
-    rating: 4.6,
-    tags: ["Mango", "Creamy", "Sweet"],
-    origin: "India",
-    brand: "House Lassi",
-    description:
-      "Ripe mango blended with yogurt and a touch of cardamom into a cool, creamy drink.",
-    totalReviews: 91,
-    review: {
-      user: "Gabby Romero",
-      rating: 4.5,
-      text: "Ripe mango, tangy yogurt and just a whisper of cardamom. Thick and creamy, but still fresh enough beside spicy food.",
-      tags: ["Mango", "Creamy"],
-      date: "13 Jun 2026",
-      likes: 24,
-      comments: 6,
-    },
-  },
-  {
-    id: "sparkling-mineral-water",
-    name: "Sparkling Mineral Water",
-    type: "Water",
-    typeColor: "#116d65",
-    image: require("./assets/drinks/catalog/sparkling-mineral-water.png"),
-    rating: 4,
-    tags: ["Mineral", "Crisp", "Fizzy"],
-    origin: "Italy",
-    brand: "Alpine Spring",
-    description:
-      "Naturally mineral-rich water with fine persistent bubbles and a clean, dry finish.",
-    totalReviews: 45,
-    review: {
-      user: "James Kent",
-      rating: 4,
-      text: "Fine bubbles, a subtle mineral bite and absolutely no sweetness. A simple drink, but especially good with a big meal.",
-      tags: ["Mineral", "Crisp"],
-      date: "12 Jun 2026",
-      likes: 10,
-      comments: 2,
-    },
-  },
-  {
-    id: "horchata",
-    name: "Horchata",
-    type: "Rice Drink",
-    typeColor: "#116d65",
-    image: require("./assets/drinks/catalog/horchata.png"),
-    rating: 4.4,
-    tags: ["Cinnamon", "Creamy", "Sweet"],
-    origin: "Mexico",
-    brand: "Casa Fresca",
-    description:
-      "A chilled rice drink infused with cinnamon and vanilla for a softly creamy refreshment.",
-    totalReviews: 59,
-    review: {
-      user: "Liddy Powell",
-      rating: 4.5,
-      text: "Soft rice creaminess with cinnamon and vanilla. Sweet, cooling and surprisingly light when it is served very cold.",
-      tags: ["Cinnamon", "Creamy"],
-      date: "11 Jun 2026",
-      likes: 18,
-      comments: 4,
-    },
-  },
-  {
-    id: "ginger-beer",
-    name: "Craft Ginger Beer",
-    type: "Ginger Beer",
-    typeColor: "#116d65",
-    image: require("./assets/drinks/catalog/ginger-beer.png"),
-    rating: 4.3,
-    tags: ["Ginger", "Spicy", "Fizzy"],
-    origin: "United Kingdom",
-    brand: "Fever Orchard",
-    description:
-      "A non-alcoholic brewed ginger drink with citrus lift and a lingering spicy kick.",
-    totalReviews: 71,
-    review: {
-      user: "Liam Harper",
-      rating: 4.5,
-      text: "Real ginger heat builds after the first sip, backed by lively bubbles and a squeeze of citrus. Excellent on its own.",
-      tags: ["Ginger", "Spicy"],
-      date: "10 Jun 2026",
-      likes: 20,
-      comments: 5,
-    },
-  },
-];
-
-const drinks: Drink[] = [
-  ...coreDrinks,
-  ...additionalDrinkSeeds.map(({ totalReviews, review, ...drink }) => drink),
-];
-
-const exploreOrder = [
-  "sprite",
-  "coke",
-  "heineken",
-  "pilsner",
-  "margarita",
-  "hophouse",
-  "guinness",
-  "petrus",
-  "birra",
-  "sevenup",
-  "cosmo",
-  "espresso",
-  "rose",
-  "cortado",
-  "matcha",
-  ...additionalDrinkSeeds.map((drink) => drink.id),
-];
-const exploreDrinks = exploreOrder
-  .map((id) => drinks.find((drink) => drink.id === id))
-  .filter((drink): drink is Drink => Boolean(drink));
-
-const coreReviews: Review[] = [
-  {
-    id: "r1",
-    drinkId: "aperol",
-    user: "Gabby Romero",
-    avatar: require("./assets/people/gabby.png"),
-    rating: 5,
-    text: "The light and effervescent combination of orange flavored bittersweet liqueur, sparkling wine, and club soda is a sunset in a cup.",
-    tags: ["Citrus", "Refreshing"],
-    date: "20 Jun 2026",
-    likes: 8,
-    comments: 2,
-  },
-  {
-    id: "r2",
-    drinkId: "aperol",
-    user: "Liam Harper",
-    avatar: require("./assets/people/liam.png"),
-    rating: 4,
-    text: "Ordered it because everyone else was drinking one. Stayed for the bittersweet orange kick and ended up ordering a second.",
-    tags: ["Zesty", "Invigorating"],
-    date: "3 May 2026",
-    likes: 6,
-    comments: 7,
-  },
-  {
-    id: "r3",
-    drinkId: "birra",
-    user: "Mark Kelly",
-    avatar: require("./assets/people/mark.png"),
-    rating: 5,
-    text: "Unlike Heineken, it has good texture. On a good day I could get drunk with just one pint of it.",
-    tags: ["Crisp"],
-    date: "15 Jun 2026",
-    likes: 3,
-    comments: 1,
-  },
-  {
-    id: "r4",
-    drinkId: "sprite",
-    user: "Sarah James",
-    avatar: require("./assets/people/sarah.png"),
-    rating: 4,
-    text: "Cold, bright and properly fizzy. The lemon-lime finish is simple, but it always does the job with salty food.",
-    tags: ["Refreshing", "Fizzy"],
-    date: "18 Jun 2026",
-    likes: 12,
-    comments: 3,
-  },
-  {
-    id: "r5",
-    drinkId: "coke",
-    user: "James Kent",
-    avatar: require("./assets/people/james.png"),
-    rating: 4,
-    text: "Classic caramel sweetness with a lively sparkle. Best poured over plenty of ice with a slice of lemon.",
-    tags: ["Sweet", "Fizzy"],
-    date: "17 Jun 2026",
-    likes: 9,
-    comments: 2,
-  },
-  {
-    id: "r6",
-    drinkId: "heineken",
-    user: "Jaques Dane",
-    avatar: require("./assets/people/jaques.png"),
-    rating: 4,
-    text: "Clean and crisp with a gentle herbal bitterness. A dependable lager when it is served properly cold.",
-    tags: ["Crisp", "Mild"],
-    date: "16 Jun 2026",
-    likes: 7,
-    comments: 4,
-  },
-  {
-    id: "r7",
-    drinkId: "pilsner",
-    user: "James Kent",
-    avatar: require("./assets/people/james.png"),
-    rating: 4.5,
-    text: "Floral hops, a firm bitter edge and a soft bready middle. It tastes balanced all the way through the finish.",
-    tags: ["Crisp", "Bitter"],
-    date: "15 Jun 2026",
-    likes: 18,
-    comments: 6,
-  },
-  {
-    id: "r8",
-    drinkId: "margarita",
-    user: "Gabby Romero",
-    avatar: require("./assets/people/gabby.png"),
-    rating: 4.5,
-    text: "Sharp fresh lime, a warm tequila note and just enough orange sweetness. The salt rim makes every sip pop.",
-    tags: ["Citrusy", "Tangy"],
-    date: "14 Jun 2026",
-    likes: 21,
-    comments: 5,
-  },
-  {
-    id: "r9",
-    drinkId: "hophouse",
-    user: "Liam Harper",
-    avatar: require("./assets/people/liam.png"),
-    rating: 4.5,
-    text: "Aromatic without becoming heavy. There is a pleasant hop bite, followed by a smooth and easy lager finish.",
-    tags: ["Mild", "Bitter"],
-    date: "12 Jun 2026",
-    likes: 11,
-    comments: 2,
-  },
-  {
-    id: "r10",
-    drinkId: "guinness",
-    user: "Liddy Powell",
-    avatar: require("./assets/people/liddy.png"),
-    rating: 5,
-    text: "Velvety texture, roasted malt and a dry finish. The creamy head makes it feel richer than it actually drinks.",
-    tags: ["Creamy", "Roasted"],
-    date: "10 Jun 2026",
-    likes: 24,
-    comments: 8,
-  },
-  {
-    id: "r11",
-    drinkId: "petrus",
-    user: "Gabby Romero",
-    avatar: require("./assets/people/gabby.png"),
-    rating: 5,
-    text: "Deep plum and dark cherry with a wonderfully silky texture. The finish is long, layered and quietly powerful.",
-    tags: ["Rich", "Dry"],
-    date: "8 Jun 2026",
-    likes: 31,
-    comments: 9,
-  },
-  {
-    id: "r12",
-    drinkId: "sevenup",
-    user: "Sarah James",
-    avatar: require("./assets/people/sarah.png"),
-    rating: 3.5,
-    text: "Light lemon and lime with plenty of bubbles. Sweeter than I remembered, but very refreshing straight from the fridge.",
-    tags: ["Citrus", "Fizzy"],
-    date: "7 Jun 2026",
-    likes: 6,
-    comments: 1,
-  },
-  {
-    id: "r13",
-    drinkId: "cosmo",
-    user: "Gabby Romero",
-    avatar: require("./assets/people/gabby.png"),
-    rating: 4,
-    text: "Tart cranberry and citrus up front, then a clean vodka finish. Bright, elegant and not overly sweet.",
-    tags: ["Tarty", "Fruity"],
-    date: "5 Jun 2026",
-    likes: 14,
-    comments: 4,
-  },
-  {
-    id: "r14",
-    drinkId: "espresso",
-    user: "Liddy Powell",
-    avatar: require("./assets/people/liddy.png"),
-    rating: 5,
-    text: "Bold espresso aroma with a smooth, lightly sweet finish. Strong enough to wake you up and polished enough for dessert.",
-    tags: ["Strong", "Coffee"],
-    date: "3 Jun 2026",
-    likes: 27,
-    comments: 7,
-  },
-  {
-    id: "r15",
-    drinkId: "rose",
-    user: "Sarah James",
-    avatar: require("./assets/people/sarah.png"),
-    rating: 4.5,
-    text: "Delicate strawberry and peach notes with a dry mineral finish. Light, floral and made for a sunny table.",
-    tags: ["Dry", "Floral"],
-    date: "1 Jun 2026",
-    likes: 16,
-    comments: 3,
-  },
-  {
-    id: "r16",
-    drinkId: "cortado",
-    user: "Liam Harper",
-    avatar: require("./assets/people/liam.png"),
-    rating: 4.5,
-    text: "The milk softens the espresso without hiding it. Compact, creamy and strong with a lovely roasted finish.",
-    tags: ["Creamy", "Strong"],
-    date: "30 May 2026",
-    likes: 13,
-    comments: 2,
-  },
-  {
-    id: "r17",
-    drinkId: "matcha",
-    user: "Sarah James",
-    avatar: require("./assets/people/sarah.png"),
-    rating: 4.5,
-    text: "Earthy matcha balanced by a soft white-chocolate sweetness. Creamy and comforting without losing the tea flavour.",
-    tags: ["Creamy", "Sweet"],
-    date: "28 May 2026",
-    likes: 19,
-    comments: 5,
-  },
-  {
-    id: "r18",
-    drinkId: "sprite",
-    user: "Liam Harper",
-    avatar: require("./assets/people/liam.png"),
-    rating: 3.5,
-    text: "Very clean citrus flavour and a sharp burst of carbonation. A little sweet, though still easy to drink.",
-    tags: ["Citrus", "Refreshing"],
-    date: "26 May 2026",
-    likes: 5,
-    comments: 1,
-  },
-];
-
-const additionalReviews: Review[] = additionalDrinkSeeds.map(
-  (drink, index) => ({
-    id: `catalog-review-${index + 1}`,
-    drinkId: drink.id,
-    avatar: reviewAuthors[drink.review.user],
-    ...drink.review,
-  }),
-);
-
-const initialReviews: Review[] = [...coreReviews, ...additionalReviews];
-
-const commentVoices = [
-  {
-    user: "Sarah James",
-    avatar: require("./assets/people/sarah.png"),
-    text: "That finish is exactly what stood out to me too.",
-  },
-  {
-    user: "James Kent",
-    avatar: require("./assets/people/james.png"),
-    text: "Adding this one to my list for the weekend.",
-  },
-  {
-    user: "Liddy Powell",
-    avatar: require("./assets/people/liddy.png"),
-    text: "Great description — I had the same flavour notes.",
-  },
-  {
-    user: "Gabby Romero",
-    avatar: require("./assets/people/gabby.png"),
-    text: "It is even better properly chilled.",
-  },
-];
-
-const initialCommentThreads: Record<string, ReviewComment[]> =
-  Object.fromEntries(
-    initialReviews.map((review) => [
-      review.id,
-      Array.from({ length: review.comments }, (_, index) => {
-        const voice = commentVoices[index % commentVoices.length];
-        return {
-          id: `${review.id}-comment-${index + 1}`,
-          user: voice.user,
-          avatar: voice.avatar,
-          text: voice.text,
-          date: index === 0 ? "Today" : `${index + 1}d`,
-        };
-      }),
-    ]),
-  );
-
-function mergeSeedCommentThreads(
-  storedThreads?: Record<string, ReviewComment[]>,
-) {
-  const normalizedStoredThreads = Object.fromEntries(
-    Object.entries(storedThreads || {}).map(([reviewId, comments]) => [
-      reviewId,
-      (comments || []).map((comment, index) => ({
-        ...comment,
-        avatar:
-          reviewAuthors[comment.user] ||
-          initialCommentThreads[reviewId]?.[index]?.avatar ||
-          require("./assets/people/mark.png"),
-      })),
-    ]),
-  );
-  return { ...initialCommentThreads, ...normalizedStoredThreads };
-}
-
-const reviewTotals: Record<string, number> = {
-  aperol: 56,
-  sprite: 84,
-  coke: 127,
-  heineken: 93,
-  pilsner: 68,
-  margarita: 72,
-  hophouse: 49,
-  guinness: 141,
-  petrus: 38,
-  birra: 61,
-  sevenup: 43,
-  cosmo: 76,
-  espresso: 109,
-  rose: 64,
-  cortado: 52,
-  matcha: 47,
-  ...Object.fromEntries(
-    additionalDrinkSeeds.map((drink) => [drink.id, drink.totalReviews]),
-  ),
-};
-
-function mergeSeedReviews(storedReviews?: Review[]) {
-  const stored = storedReviews || [];
-  const storedById = new Map(stored.map((review) => [review.id, review]));
-  const seedIds = new Set(initialReviews.map((review) => review.id));
-  return [
-    ...initialReviews.map((review) => {
-      const storedReview = storedById.get(review.id);
-      const mergedReview = storedReview
-        ? { ...review, ...storedReview }
-        : review;
-      return {
-        ...mergedReview,
-        avatar: reviewAuthors[mergedReview.user] || review.avatar,
-      };
-    }),
-    ...stored
-      .filter((review) => !seedIds.has(review.id))
-      .map((review) => ({
-        ...review,
-        avatar:
-          reviewAuthors[review.user] ||
-          review.avatar ||
-          require("./assets/people/mark.png"),
-      })),
-  ];
-}
-
-const searchableProfiles: SearchProfile[] = [
-  {
-    id: "mark",
-    name: "Mark Kelly",
-    handle: "@markelly1",
-    memberSince: "Jun 2026",
-    buddies: 184,
-    avatar: require("./assets/people/mark.png"),
-  },
-  {
-    id: "gabby",
-    name: "Gabby Romero",
-    handle: "@gabbyromero",
-    memberSince: "Mar 2026",
-    buddies: 326,
-    avatar: require("./assets/people/gabby.png"),
-  },
-  {
-    id: "liam",
-    name: "Liam Harper",
-    handle: "@liamharper",
-    memberSince: "Apr 2026",
-    buddies: 211,
-    avatar: require("./assets/people/liam.png"),
-  },
-  {
-    id: "sarah",
-    name: "Sarah James",
-    handle: "@sarahsips",
-    memberSince: "May 2026",
-    buddies: 409,
-    avatar: require("./assets/people/sarah.png"),
-  },
-  {
-    id: "liddy",
-    name: "Liddy Powell",
-    handle: "@liddysips",
-    memberSince: "Feb 2026",
-    buddies: 287,
-    avatar: require("./assets/people/liddy.png"),
-  },
-  {
-    id: "jaques",
-    name: "Jaques Dane",
-    handle: "@jaquesdrinks",
-    memberSince: "Jan 2026",
-    buddies: 152,
-    avatar: require("./assets/people/jaques.png"),
-  },
-  {
-    id: "james",
-    name: "James Kent",
-    handle: "@jameskent",
-    memberSince: "May 2026",
-    buddies: 238,
-    avatar: require("./assets/people/james.png"),
-  },
-];
-
-const glass = {
-  backgroundColor: "rgba(4,178,100,.15)",
-  borderColor: "rgba(255,255,255,.5)",
-  borderWidth: 0.35,
-  ...(Platform.OS === "android"
-    ? {
-        boxShadow: "0px 4px 4px rgba(0,0,0,0.28)",
-      }
-    : {
-        shadowColor: "#000",
-        shadowOpacity: 0.25,
-        shadowRadius: 4,
-        shadowOffset: { width: 0, height: 4 },
-        elevation: 5,
-      }),
-} as const;
-
 function GlassLayers({
   radius = 23,
   intensity = 32,
@@ -1908,12 +350,12 @@ function BackgroundNoise() {
           id="backgroundNoisePattern"
           x="0"
           y="0"
-          width="42"
-          height="42"
+          width={BACKGROUND_NOISE_TILE}
+          height={BACKGROUND_NOISE_TILE}
           patternUnits="userSpaceOnUse"
         >
-          <Path d={BACKGROUND_NOISE_MINT} fill="#04b264" opacity={0.2} />
-          <Path d={BACKGROUND_NOISE_LIGHT} fill="#fff" opacity={0.78} />
+          <Path d={BACKGROUND_NOISE_MINT} fill="#04b264" opacity={0.34} />
+          <Path d={BACKGROUND_NOISE_LIGHT} fill="#fff" opacity={0.9} />
         </Pattern>
       </Defs>
       <Rect
@@ -1934,7 +376,7 @@ function Background({
 }) {
   return (
     <SafeAreaView style={s.safe}>
-      <StatusBar style="dark" />
+      <StatusBar hidden />
       <View style={s.bgWhite} />
       <View
         pointerEvents="none"
@@ -1945,7 +387,6 @@ function Background({
       />
       <View pointerEvents="none" style={s.bgMint} />
       <BackgroundNoise />
-      <DeviceStatusBar />
       {children}
     </SafeAreaView>
   );
@@ -1980,6 +421,13 @@ function DrinkCardGlow() {
 }
 
 function DrinkCardVisual({ drink }: { drink: Drink }) {
+  const [imageFailed, setImageFailed] = useState(false);
+  useEffect(() => setImageFailed(false), [drink.id, drink.image]);
+  const remoteImage =
+    typeof drink.image === "object" &&
+    !Array.isArray(drink.image) &&
+    "uri" in drink.image;
+  const isSprite = normalizedDrinkName(drink.name) === "sprite";
   return (
     <View style={s.drinkCardSurface}>
       <GlassLayers
@@ -1989,11 +437,18 @@ function DrinkCardVisual({ drink }: { drink: Drink }) {
       />
       <DrinkCardGlow />
       <View style={s.drinkImageFrame}>
-        <Image
-          source={drink.image}
-          style={[s.drinkImage, drink.id === "sprite" && s.spriteExploreImage]}
-          resizeMode="contain"
-        />
+        {!imageFailed && (
+          <Image
+            source={drink.image}
+            style={[
+              s.drinkImage,
+              remoteImage && (s.remoteDrinkImage as any),
+              isSprite && s.spriteExploreImage,
+            ]}
+            resizeMode="contain"
+            onError={() => setImageFailed(true)}
+          />
+        )}
       </View>
       <View style={s.drinkLabel}>
         <Text numberOfLines={1} style={s.drinkName}>
@@ -2006,6 +461,12 @@ function DrinkCardVisual({ drink }: { drink: Drink }) {
 }
 
 function CompactFeedDrinkCard({ drink }: { drink: Drink }) {
+  const [imageFailed, setImageFailed] = useState(false);
+  useEffect(() => setImageFailed(false), [drink.id, drink.image]);
+  const remoteImage =
+    typeof drink.image === "object" &&
+    !Array.isArray(drink.image) &&
+    "uri" in drink.image;
   return (
     <View style={s.friendCompactCard}>
       <View style={s.friendCompactSurface}>
@@ -2016,11 +477,17 @@ function CompactFeedDrinkCard({ drink }: { drink: Drink }) {
         />
         <DrinkCardGlow />
         <View style={s.friendCompactImageFrame}>
-          <Image
-            source={drink.image}
-            style={s.friendCompactImage}
-            resizeMode="contain"
-          />
+          {!imageFailed && (
+            <Image
+              source={drink.image}
+              style={[
+                s.friendCompactImage,
+                remoteImage && (s.remoteDrinkImage as any),
+              ]}
+              resizeMode="contain"
+              onError={() => setImageFailed(true)}
+            />
+          )}
         </View>
         <View style={s.friendCompactLabel}>
           <Text numberOfLines={1} style={s.friendCompactName}>
@@ -2213,12 +680,12 @@ function BottomNav({
 }
 
 function ResponsiveAppFrame({ children }: { children: React.ReactNode }) {
-  const { width } = useWindowDimensions();
+  const { width, height } = useWindowDimensions();
   if (Platform.OS === "web") return <>{children}</>;
 
   const scale = Math.min(1, width / FIGMA_FRAME_WIDTH);
   const scaledWidth = FIGMA_FRAME_WIDTH * scale;
-  const scaledHeight = FIGMA_FRAME_HEIGHT * scale;
+  const canvasHeight = height / scale;
 
   return (
     <View style={s.nativeViewport}>
@@ -2227,7 +694,7 @@ function ResponsiveAppFrame({ children }: { children: React.ReactNode }) {
           s.nativeFrame,
           {
             width: scaledWidth,
-            height: scaledHeight,
+            height,
           },
         ]}
       >
@@ -2235,8 +702,9 @@ function ResponsiveAppFrame({ children }: { children: React.ReactNode }) {
           style={[
             s.nativeCanvas,
             {
+              height: canvasHeight,
               left: -(FIGMA_FRAME_WIDTH * (1 - scale)) / 2,
-              top: -(FIGMA_FRAME_HEIGHT * (1 - scale)) / 2,
+              top: -(canvasHeight * (1 - scale)) / 2,
               transform: [{ scale }],
             },
           ]}
@@ -2248,6 +716,70 @@ function ResponsiveAppFrame({ children }: { children: React.ReactNode }) {
   );
 }
 
+function ScreenTransition({
+  screen,
+  children,
+}: {
+  screen: Screen;
+  children: React.ReactNode;
+}) {
+  const { width } = useWindowDimensions();
+  const translateX = useRef(new Animated.Value(width)).current;
+
+  useEffect(() => {
+    translateX.setValue(width);
+    const animation = Animated.timing(translateX, {
+      toValue: 0,
+      duration: 280,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: true,
+    });
+    animation.start();
+    return () => animation.stop();
+  }, [screen, translateX, width]);
+
+  return (
+    <Animated.View
+      style={[s.screenTransition, { transform: [{ translateX }] }]}
+    >
+      {children}
+    </Animated.View>
+  );
+}
+
+function formatDateOfBirth(value: string) {
+  const digits = value.replace(/\D/g, "").slice(0, 8);
+  if (digits.length <= 2) return digits;
+  if (digits.length <= 4) return `${digits.slice(0, 2)}/${digits.slice(2)}`;
+  return `${digits.slice(0, 2)}/${digits.slice(2, 4)}/${digits.slice(4)}`;
+}
+
+function validatedDateOfBirth(value: string) {
+  const match = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(value);
+  if (!match) return null;
+  const day = Number(match[1]);
+  const month = Number(match[2]);
+  const year = Number(match[3]);
+  const birthDate = new Date(year, month - 1, day);
+  if (
+    birthDate.getFullYear() !== year ||
+    birthDate.getMonth() !== month - 1 ||
+    birthDate.getDate() !== day
+  ) {
+    return null;
+  }
+  const today = new Date();
+  const adultCutoff = new Date(
+    today.getFullYear() - 18,
+    today.getMonth(),
+    today.getDate(),
+  );
+  if (birthDate > adultCutoff) return "underage" as const;
+  return `${year.toString().padStart(4, "0")}-${month
+    .toString()
+    .padStart(2, "0")}-${day.toString().padStart(2, "0")}`;
+}
+
 function Onboarding({
   visible,
   onEmailSignIn,
@@ -2255,17 +787,28 @@ function Onboarding({
   onProvider,
 }: {
   visible: boolean;
-  onEmailSignIn: (email: string, password: string) => Promise<void>;
+  onEmailSignIn: (
+    email: string,
+    password: string,
+    dateOfBirth: string,
+  ) => Promise<void>;
   onEmailSignUp: (
     name: string,
     email: string,
     password: string,
+    dateOfBirth: string,
+  ) => Promise<"signed-in" | "check-email">;
+  onProvider: (
+    provider: "google" | "apple",
+    dateOfBirth: string,
   ) => Promise<void>;
-  onProvider: (provider: "google" | "apple") => Promise<void>;
 }) {
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [dateOfBirth, setDateOfBirth] = useState("");
+  const [notice, setNotice] = useState("");
+  const [noticeTone, setNoticeTone] = useState<"success" | "error">("success");
   const [busy, setBusy] = useState(false);
   const [accountMode, setAccountMode] = useState<"social" | "email" | "create">(
     "social",
@@ -2273,28 +816,68 @@ function Onboarding({
   const run = async (operation: () => Promise<void>) => {
     try {
       setBusy(true);
+      setNotice("");
       await operation();
     } catch (error) {
-      Alert.alert(
-        "Could not sign in",
-        error instanceof Error ? error.message : "Please try again.",
+      setNoticeTone("error");
+      setNotice(
+        error instanceof Error
+          ? error.message
+          : accountMode === "create"
+            ? "Could not create account. Please try again."
+            : "Could not sign in. Please try again.",
       );
     } finally {
       setBusy(false);
     }
   };
+  const showFormError = (message: string) => {
+    setNoticeTone("error");
+    setNotice(message);
+  };
   const finishEmail = async () => {
     if (!email.trim() || !email.includes("@"))
-      return Alert.alert("Valid email required");
+      return showFormError("Enter a valid email address.");
     if (accountMode === "create" && !name.trim())
-      return Alert.alert("Name required");
+      return showFormError("Enter your name.");
+    const normalizedBirthDate = validatedDateOfBirth(dateOfBirth);
+    if (!normalizedBirthDate)
+      return showFormError("Enter your date of birth as DD/MM/YYYY.");
+    if (normalizedBirthDate === "underage")
+      return showFormError("You must be 18+ to use this app.");
     if (password.length < 8)
-      return Alert.alert("Password required", "Use at least eight characters.");
-    await run(() =>
-      accountMode === "create"
-        ? onEmailSignUp(name.trim(), email.trim(), password)
-        : onEmailSignIn(email.trim(), password),
-    );
+      return showFormError("Your password must contain at least 8 characters.");
+    await run(async () => {
+      if (accountMode === "create") {
+        const outcome = await onEmailSignUp(
+          name.trim(),
+          email.trim(),
+          password,
+          normalizedBirthDate as string,
+        );
+        if (outcome === "check-email") {
+          setNoticeTone("success");
+          setNotice(
+            "Account created. Check your email, open the confirmation link, then return here and sign in.",
+          );
+          setPassword("");
+        }
+        return;
+      }
+      await onEmailSignIn(
+        email.trim(),
+        password,
+        normalizedBirthDate as string,
+      );
+    });
+  };
+  const finishProvider = async (provider: "google" | "apple") => {
+    const normalizedBirthDate = validatedDateOfBirth(dateOfBirth);
+    if (!normalizedBirthDate)
+      return showFormError("Enter your date of birth as DD/MM/YYYY.");
+    if (normalizedBirthDate === "underage")
+      return showFormError("You must be 18+ to use this app.");
+    await run(() => onProvider(provider, normalizedBirthDate));
   };
   return (
     <Modal visible={visible} transparent animationType="slide">
@@ -2302,11 +885,19 @@ function Onboarding({
         <View style={s.onboard}>
           <View style={s.handle} />
           <Text style={s.onboardTitle}>Welcome to Saturated</Text>
-          <Text style={s.onboardAge}>You must be 21+ to continue</Text>
-          <Text style={s.onboardCopy}>
-            You must be 21 or older. If your sign-in provider supplies verified
-            age eligibility, Saturated stores only the verification result.
-          </Text>
+          <Text style={s.onboardAge}>You must be 18+ to use this app.</Text>
+          <View style={s.birthDateField}>
+            <Text style={s.birthDateLabel}>Date of birth</Text>
+            <TextInput
+              value={dateOfBirth}
+              onChangeText={(value) => setDateOfBirth(formatDateOfBirth(value))}
+              keyboardType="number-pad"
+              maxLength={10}
+              placeholder="DD/MM/YYYY"
+              placeholderTextColor="rgba(32,26,27,.45)"
+              style={s.birthDateInput}
+            />
+          </View>
           {accountMode === "social" ? (
             <>
               <Pressable
@@ -2314,7 +905,7 @@ function Onboarding({
                 accessibilityLabel="Continue with Google"
                 style={s.socialButton}
                 disabled={busy}
-                onPress={() => run(() => onProvider("google"))}
+                onPress={() => void finishProvider("google")}
               >
                 <Globe size={20} color="#4285f4" />
                 <Text style={s.socialButtonText}>Continue with Google</Text>
@@ -2324,7 +915,7 @@ function Onboarding({
                 accessibilityLabel="Continue with Apple"
                 style={[s.socialButton, s.socialButtonDark]}
                 disabled={busy}
-                onPress={() => run(() => onProvider("apple"))}
+                onPress={() => void finishProvider("apple")}
               >
                 <Apple size={21} color="#fff" fill="#fff" />
                 <Text style={[s.socialButtonText, { color: "#fff" }]}>
@@ -2335,7 +926,10 @@ function Onboarding({
                 accessibilityRole="button"
                 accessibilityLabel="Continue with email"
                 style={s.socialButton}
-                onPress={() => setAccountMode("email")}
+                onPress={() => {
+                  setNotice("");
+                  setAccountMode("email");
+                }}
               >
                 <Mail size={20} color={C.teal} />
                 <Text style={s.socialButtonText}>Continue with email</Text>
@@ -2345,6 +939,7 @@ function Onboarding({
             <>
               {accountMode === "create" && (
                 <TextInput
+                  autoFocus
                   value={name}
                   onChangeText={setName}
                   placeholder="Your name"
@@ -2353,7 +948,7 @@ function Onboarding({
                 />
               )}
               <TextInput
-                autoFocus
+                autoFocus={accountMode === "email"}
                 value={email}
                 onChangeText={setEmail}
                 autoCapitalize="none"
@@ -2391,19 +986,42 @@ function Onboarding({
               <Pressable
                 accessibilityRole="button"
                 accessibilityLabel="Back to sign in options"
-                onPress={() => setAccountMode("social")}
+                onPress={() => {
+                  setNotice("");
+                  setAccountMode("social");
+                }}
                 style={s.textButton}
               >
                 <Text style={s.textButtonText}>Back to sign in options</Text>
               </Pressable>
             </>
           )}
+          {!!notice && (
+            <View
+              style={[
+                s.authNotice,
+                noticeTone === "error" && s.authNoticeError,
+              ]}
+            >
+              <Text
+                style={[
+                  s.authNoticeText,
+                  noticeTone === "error" && s.authNoticeTextError,
+                ]}
+              >
+                {notice}
+              </Text>
+            </View>
+          )}
           {accountMode !== "create" && (
             <Pressable
               accessibilityRole="button"
               accessibilityLabel="Create an account"
               style={s.createAccountButton}
-              onPress={() => setAccountMode("create")}
+              onPress={() => {
+                setNotice("");
+                setAccountMode("create");
+              }}
             >
               <UserPlus size={18} color={C.red} />
               <Text style={s.createAccountText}>Create an account</Text>
@@ -2415,17 +1033,175 @@ function Onboarding({
   );
 }
 
+function OAuthConsentScreen({
+  authorizationId,
+  session,
+  onRequireSignIn,
+}: {
+  authorizationId: string | null;
+  session: Session | null;
+  onRequireSignIn: () => void;
+}) {
+  const [details, setDetails] = useState<OAuthConsentRequest | null>(null);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState<"approve" | "deny" | null>(null);
+
+  useEffect(() => {
+    if (!authorizationId) {
+      setError(
+        "This consent page needs to be opened from a valid Supabase authorization request.",
+      );
+      return;
+    }
+    if (!session) return;
+    let active = true;
+    setError("");
+    void loadOAuthConsentRequest(authorizationId)
+      .then((request) => {
+        if (!active) return;
+        if ("redirect_url" in request) {
+          if (Platform.OS === "web")
+            window.location.assign(request.redirect_url);
+          return;
+        }
+        setDetails(request);
+      })
+      .catch((requestError) => {
+        if (!active) return;
+        setError(
+          requestError instanceof Error
+            ? requestError.message
+            : "Could not load this authorization request.",
+        );
+      });
+    return () => {
+      active = false;
+    };
+  }, [authorizationId, session]);
+
+  const decide = async (decision: "approve" | "deny") => {
+    if (!authorizationId) return;
+    try {
+      setBusy(decision);
+      setError("");
+      const redirectUrl = await answerOAuthConsentRequest(
+        authorizationId,
+        decision,
+      );
+      if (Platform.OS === "web") window.location.assign(redirectUrl);
+    } catch (requestError) {
+      setError(
+        requestError instanceof Error
+          ? requestError.message
+          : "Could not complete this authorization request.",
+      );
+      setBusy(null);
+    }
+  };
+
+  const scopeLabels: Record<string, string> = {
+    openid: "Verify your identity",
+    profile: "View your Saturated profile",
+    email: "View your email address",
+    phone: "View your phone number",
+  };
+
+  return (
+    <Background>
+      <ScrollView
+        style={s.oauthConsentScroll}
+        contentContainerStyle={s.oauthConsentContent}
+      >
+        <Text style={s.oauthBrand}>Saturated</Text>
+        <View style={s.oauthConsentCard}>
+          <GlassLayers radius={24} intensity={30} />
+          {!session ? (
+            <>
+              <Text style={s.oauthConsentTitle}>Sign in to continue</Text>
+              <Text style={s.oauthConsentCopy}>
+                Sign in to review and approve this access request.
+              </Text>
+              <Pressable style={s.primary} onPress={onRequireSignIn}>
+                <Text style={s.primaryText}>Sign in</Text>
+              </Pressable>
+            </>
+          ) : !details && !error ? (
+            <ActivityIndicator color={C.red} />
+          ) : details ? (
+            <>
+              {!!details.client.logo_uri && (
+                <Image
+                  source={{ uri: details.client.logo_uri }}
+                  style={s.oauthClientLogo}
+                  resizeMode="contain"
+                />
+              )}
+              <Text style={s.oauthConsentTitle}>
+                Authorize {details.client.name}
+              </Text>
+              <Text style={s.oauthConsentCopy}>
+                {details.client.name} wants to access your Saturated account as{" "}
+                {details.user.email}.
+              </Text>
+              <View style={s.oauthScopeList}>
+                {details.scope
+                  .split(" ")
+                  .filter(Boolean)
+                  .map((scope) => (
+                    <View key={scope} style={s.oauthScopeRow}>
+                      <View style={s.oauthScopeDot} />
+                      <Text style={s.oauthScopeText}>
+                        {scopeLabels[scope] || `Use ${scope} access`}
+                      </Text>
+                    </View>
+                  ))}
+              </View>
+              <Text style={s.oauthRedirectText} numberOfLines={2}>
+                You will return to {details.redirect_uri}
+              </Text>
+              <View style={s.oauthConsentActions}>
+                <Pressable
+                  disabled={Boolean(busy)}
+                  onPress={() => void decide("deny")}
+                  style={s.oauthDenyButton}
+                >
+                  {busy === "deny" ? (
+                    <ActivityIndicator color={C.red} />
+                  ) : (
+                    <Text style={s.oauthDenyText}>Deny</Text>
+                  )}
+                </Pressable>
+                <Pressable
+                  disabled={Boolean(busy)}
+                  onPress={() => void decide("approve")}
+                  style={[s.primary, s.oauthApproveButton]}
+                >
+                  {busy === "approve" ? (
+                    <ActivityIndicator color="#fff" />
+                  ) : (
+                    <Text style={s.primaryText}>Allow access</Text>
+                  )}
+                </Pressable>
+              </View>
+            </>
+          ) : null}
+          {!!error && <Text style={s.oauthError}>{error}</Text>}
+        </View>
+      </ScrollView>
+    </Background>
+  );
+}
+
 function Splash() {
   return (
     <View style={s.splash}>
-      <StatusBar style="light" />
+      <StatusBar hidden />
       <Image
         source={require("./assets/splash.png")}
         style={s.splashImage}
         resizeMode="cover"
       />
       <View style={s.splashShade} />
-      <DeviceStatusBar light />
       <Text style={s.splashTitle}>Saturated</Text>
     </View>
   );
@@ -2443,6 +1219,10 @@ function Explore({
   onGo: (s: Screen) => void;
 }) {
   const [filter, setFilter] = useState("All");
+  const [alcoholFilter, setAlcoholFilter] = useState<
+    "all" | "alcoholic" | "non-alcoholic"
+  >("all");
+  const [visibleCount, setVisibleCount] = useState(EXPLORE_PAGE_SIZE);
   const filterOptions = [
     "All",
     "Soft Drink",
@@ -2460,9 +1240,36 @@ function Explore({
     if (filterOptions.includes(drink.type)) return drink.type;
     return "Other";
   };
-  const shown = items.filter((drink) =>
-    filter === "All" ? true : drinkCategory(drink) === filter,
-  );
+  const alcoholicCategories = [
+    "beer",
+    "cocktail",
+    "wine",
+    "whiskey",
+    "whisky",
+    "spirit",
+    "vodka",
+    "gin",
+    "rum",
+    "tequila",
+    "brandy",
+    "liqueur",
+  ];
+  const isAlcoholic = (drink: Drink) => {
+    const category = drink.type.toLowerCase();
+    return alcoholicCategories.some((value) => category.includes(value));
+  };
+  const shown = items.filter((drink) => {
+    const matchesCategory = filter === "All" || drinkCategory(drink) === filter;
+    const alcoholic = isAlcoholic(drink);
+    const matchesAlcohol =
+      alcoholFilter === "all" ||
+      (alcoholFilter === "alcoholic" ? alcoholic : !alcoholic);
+    return matchesCategory && matchesAlcohol;
+  });
+  useEffect(() => {
+    setVisibleCount(EXPLORE_PAGE_SIZE);
+  }, [filter, alcoholFilter, items]);
+  const visibleDrinks = shown.slice(0, visibleCount);
   return (
     <Background>
       <View style={s.headerRow}>
@@ -2486,6 +1293,38 @@ function Explore({
           </Pressable>
         </View>
       </View>
+      <View style={s.alcoholToggle} accessibilityRole="tablist">
+        {(
+          [
+            ["all", "All"],
+            ["alcoholic", "Alcoholic"],
+            ["non-alcoholic", "Non-Alc"],
+          ] as const
+        ).map(([value, label]) => {
+          const selected = alcoholFilter === value;
+          return (
+            <Pressable
+              key={value}
+              accessibilityRole="tab"
+              accessibilityState={{ selected }}
+              onPress={() => setAlcoholFilter(value)}
+              style={[
+                s.alcoholToggleItem,
+                selected && s.alcoholToggleItemActive,
+              ]}
+            >
+              <Text
+                style={[
+                  s.alcoholToggleText,
+                  selected && s.alcoholToggleTextActive,
+                ]}
+              >
+                {label}
+              </Text>
+            </Pressable>
+          );
+        })}
+      </View>
       <ScrollView
         horizontal
         style={s.filterScroller}
@@ -2504,7 +1343,7 @@ function Explore({
         ))}
       </ScrollView>
       <FlatList
-        data={shown}
+        data={visibleDrinks}
         style={s.screenList}
         numColumns={3}
         keyExtractor={(x) => x.id}
@@ -2521,6 +1360,14 @@ function Explore({
             <DrinkCardVisual drink={item} />
           </Pressable>
         )}
+        onEndReachedThreshold={0.35}
+        onEndReached={() => {
+          if (visibleCount < shown.length) {
+            setVisibleCount((current) =>
+              Math.min(current + EXPLORE_PAGE_SIZE, shown.length),
+            );
+          }
+        }}
       />
       <BottomNav active="explore" onGo={onGo} />
     </Background>
@@ -4783,6 +3630,13 @@ export default function App() {
   >("menu");
   const [onboarded, setOnboarded] = useState(false);
   const [ready, setReady] = useState(false);
+  const isOAuthConsentRoute =
+    Platform.OS === "web" &&
+    typeof window !== "undefined" &&
+    window.location.pathname === "/oauth/consent";
+  const oauthAuthorizationId = isOAuthConsentRoute
+    ? new URLSearchParams(window.location.search).get("authorization_id")
+    : null;
 
   const refreshDatabaseState = async (activeSession: Session | null) => {
     const [catalogueRows, profileRows, reviewRows] = await Promise.all([
@@ -4790,7 +3644,18 @@ export default function App() {
       loadProfiles(),
       loadReviews(),
     ]);
-    const mappedDrinks = catalogueRows.map(beverageFromDatabase);
+    const mappedDrinks = catalogueRows
+      .map(beverageFromDatabase)
+      .sort((a, b) => {
+        const aFeatured = featuredCatalogueOrder.indexOf(a.id);
+        const bFeatured = featuredCatalogueOrder.indexOf(b.id);
+        if (aFeatured !== -1 || bFeatured !== -1) {
+          if (aFeatured === -1) return 1;
+          if (bFeatured === -1) return -1;
+          return aFeatured - bFeatured;
+        }
+        return a.name.localeCompare(b.name);
+      });
     const mappedProfiles = profileRows.map(profileFromDatabase);
     const mappedReviews = reviewRows.map(reviewFromDatabase);
     setCatalogueDrinks(mappedDrinks);
@@ -4888,6 +3753,22 @@ export default function App() {
     const applySession = async (nextSession: Session | null) => {
       if (!active) return;
       setSession(nextSession);
+      if (nextSession) {
+        const pendingBirthDate = await AsyncStorage.getItem(
+          PENDING_BIRTH_DATE_KEY,
+        );
+        if (pendingBirthDate) {
+          try {
+            await updateCurrentDateOfBirth(
+              nextSession.user.id,
+              pendingBirthDate,
+            );
+            await AsyncStorage.removeItem(PENDING_BIRTH_DATE_KEY);
+          } catch (error) {
+            console.warn("Could not save date of birth", error);
+          }
+        }
+      }
       await refreshDatabaseState(nextSession);
       if (!active) return;
       setOnboarded(Boolean(nextSession));
@@ -5159,7 +4040,15 @@ export default function App() {
     ? reviews.find((item) => item.id === editingReviewId)
     : undefined;
   let body: React.ReactNode;
-  if (screen === "splash") body = <Splash />;
+  if (isOAuthConsentRoute)
+    body = (
+      <OAuthConsentScreen
+        authorizationId={oauthAuthorizationId}
+        session={session}
+        onRequireSignIn={() => setOnboard(true)}
+      />
+    );
+  else if (screen === "splash") body = <Splash />;
   else if (screen === "explore")
     body = (
       <Explore
@@ -5438,1689 +4327,49 @@ export default function App() {
     );
   return (
     <SafeAreaProvider>
-      <ResponsiveAppFrame>{body}</ResponsiveAppFrame>
+      <ResponsiveAppFrame>
+        <ScreenTransition
+          key={isOAuthConsentRoute ? "oauth-consent" : screen}
+          screen={screen}
+        >
+          {body}
+        </ScreenTransition>
+      </ResponsiveAppFrame>
       <Onboarding
         visible={onboard}
-        onEmailSignIn={async (accountEmail, password) => {
-          await signInWithEmail(accountEmail, password);
+        onEmailSignIn={async (accountEmail, password, dateOfBirth) => {
+          await AsyncStorage.setItem(PENDING_BIRTH_DATE_KEY, dateOfBirth);
+          try {
+            await signInWithEmail(accountEmail, password);
+          } catch (error) {
+            await AsyncStorage.removeItem(PENDING_BIRTH_DATE_KEY);
+            throw error;
+          }
         }}
-        onEmailSignUp={async (displayName, accountEmail, password) => {
+        onEmailSignUp={async (
+          displayName,
+          accountEmail,
+          password,
+          dateOfBirth,
+        ) => {
           const result = await signUpWithEmail(
             displayName,
             accountEmail,
             password,
+            dateOfBirth,
           );
-          if (!result.session) {
-            Alert.alert(
-              "Check your email",
-              "Open the confirmation link, then return to Saturated to finish signing in.",
-            );
-          }
+          return result.session ? "signed-in" : "check-email";
         }}
-        onProvider={async (provider) => {
-          await signInWithProvider(provider);
+        onProvider={async (provider, dateOfBirth) => {
+          await AsyncStorage.setItem(PENDING_BIRTH_DATE_KEY, dateOfBirth);
+          try {
+            await signInWithProvider(provider);
+          } catch (error) {
+            await AsyncStorage.removeItem(PENDING_BIRTH_DATE_KEY);
+            throw error;
+          }
         }}
       />
     </SafeAreaProvider>
   );
 }
-
-const s = StyleSheet.create({
-  nativeViewport: {
-    flex: 1,
-    alignItems: "center",
-    justifyContent: "flex-start",
-    overflow: "hidden",
-    backgroundColor: "#fff",
-  },
-  nativeFrame: {
-    position: "relative",
-    overflow: "hidden",
-  },
-  nativeCanvas: {
-    position: "absolute",
-    width: FIGMA_FRAME_WIDTH,
-    height: FIGMA_FRAME_HEIGHT,
-  },
-  safe: {
-    flex: 1,
-    height: Platform.OS === "web" ? FIGMA_FRAME_HEIGHT : "100%",
-    maxHeight: FIGMA_FRAME_HEIGHT,
-    minHeight: 0,
-    width: Platform.OS === "web" ? FIGMA_FRAME_WIDTH : "100%",
-    maxWidth: FIGMA_FRAME_WIDTH,
-    marginHorizontal: "auto",
-    backgroundColor: "#fff",
-    overflow: "hidden",
-    paddingTop: Platform.OS === "android" ? 22 : 0,
-  },
-  bgWhite: {
-    ...StyleSheet.absoluteFill,
-    backgroundColor: "#fff",
-  },
-  bgCream: {
-    ...StyleSheet.absoluteFill,
-  },
-  bgMint: {
-    ...StyleSheet.absoluteFill,
-    backgroundColor: "rgba(234,248,209,.2)",
-  },
-  bgNoise: {
-    ...StyleSheet.absoluteFill,
-    opacity: 1,
-  },
-  glassBlur: {
-    ...StyleSheet.absoluteFill,
-    overflow: "hidden",
-  },
-  glassGradient: {
-    ...StyleSheet.absoluteFill,
-  },
-  glassInnerEdge: {
-    ...StyleSheet.absoluteFill,
-    borderWidth: 0.35,
-    borderColor: "rgba(255,255,255,.5)",
-  },
-  deviceStatusBar: {
-    height: 22,
-    backgroundColor: "transparent",
-    paddingHorizontal: 24,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    zIndex: 20,
-  },
-  deviceStatusText: {
-    color: C.ink,
-    fontFamily: F.bold,
-    fontSize: 12,
-    lineHeight: 14,
-  },
-  deviceStatusTextLight: { color: "#fff" },
-  loader: { flex: 1, alignItems: "center", justifyContent: "center" },
-  screenList: { flex: 1, minHeight: 0 },
-  screenScroll: { flex: 1, minHeight: 0 },
-  heading: {
-    height: 102,
-    flexDirection: "row",
-    gap: 16,
-    alignItems: "center",
-    paddingHorizontal: 30,
-    paddingTop: 12,
-  },
-  headingText: { fontFamily: F.display, fontSize: 32, color: C.red },
-  headerRow: {
-    height: 90,
-    paddingHorizontal: 27,
-    paddingTop: 12,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-  },
-  iconRow: { flexDirection: "row", gap: 10, alignItems: "center" },
-  headerIcon: {
-    width: 25,
-    height: 32,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  headerIconActive: {
-    borderRadius: 10,
-    backgroundColor: "rgba(204,36,44,.1)",
-  },
-  filterScroller: {
-    height: 45,
-    minHeight: 45,
-    maxHeight: 45,
-    flexGrow: 0,
-    flexShrink: 0,
-  },
-  filters: { height: 45, paddingHorizontal: 27, gap: 8, alignItems: "center" },
-  pill: {
-    borderWidth: 1,
-    borderColor: "rgba(0,0,0,.4)",
-    borderRadius: 999,
-    paddingHorizontal: 13,
-    paddingVertical: 6,
-    alignSelf: "flex-start",
-  },
-  tiny: { fontFamily: F.medium, fontSize: 10, color: C.ink },
-  body: { fontFamily: F.medium, fontSize: 12, lineHeight: 15, color: C.ink },
-  reviewText: {
-    fontFamily: F.regular,
-    fontSize: 12,
-    lineHeight: 15,
-    color: C.ink,
-  },
-  cardTitle: { fontFamily: F.bold, fontSize: 14, color: C.ink },
-  inline: { flexDirection: "row", alignItems: "center", gap: 8 },
-  inlineText: { fontFamily: F.medium, fontSize: 12, color: C.ink },
-  primary: {
-    backgroundColor: C.red,
-    borderRadius: 23,
-    alignItems: "center",
-    justifyContent: "center",
-    padding: 13,
-    shadowColor: "#000",
-    shadowOpacity: 0.2,
-    shadowRadius: 3,
-    shadowOffset: { width: 0, height: 3 },
-  },
-  primaryText: { fontFamily: F.bold, fontSize: 14, color: "#fff" },
-  secondary: {
-    ...glass,
-    borderRadius: 23,
-    alignItems: "center",
-    justifyContent: "center",
-    padding: 13,
-  },
-  secondaryText: { fontFamily: F.bold, fontSize: 14, color: C.teal },
-  searchInput: {
-    height: 38,
-    marginHorizontal: 28,
-    marginVertical: 4,
-    borderRadius: 19,
-    backgroundColor: "rgba(255,255,255,.7)",
-    paddingHorizontal: 16,
-    fontFamily: F.regular,
-  },
-  searchBar: {
-    ...glass,
-    height: 52,
-    marginHorizontal: 32,
-    borderRadius: 23,
-    paddingHorizontal: 16,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
-    backgroundColor: "rgba(255,255,255,.74)",
-  },
-  searchField: {
-    flex: 1,
-    height: 48,
-    fontFamily: F.medium,
-    fontSize: 14,
-    color: C.ink,
-    outlineStyle: "none",
-  } as any,
-  searchModeSwitch: {
-    height: 38,
-    marginHorizontal: 32,
-    marginBottom: 12,
-    padding: 3,
-    borderRadius: 19,
-    backgroundColor: "rgba(43,73,89,.1)",
-    flexDirection: "row",
-  },
-  searchModeButton: {
-    flex: 1,
-    borderRadius: 16,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  searchModeButtonActive: {
-    backgroundColor: C.teal,
-    shadowColor: "#000",
-    shadowOpacity: 0.16,
-    shadowRadius: 2,
-    shadowOffset: { width: 0, height: 2 },
-  },
-  searchModeText: {
-    fontFamily: F.bold,
-    fontSize: 12,
-    color: C.teal,
-  },
-  searchModeTextActive: { color: "#fff" },
-  searchCount: {
-    marginHorizontal: 33,
-    marginTop: 16,
-    marginBottom: 8,
-    fontFamily: F.bold,
-    fontSize: 12,
-    color: C.ink,
-  },
-  searchResults: { paddingHorizontal: 32, paddingBottom: 30, gap: 12 },
-  searchResultCard: {
-    ...glass,
-    minHeight: 96,
-    borderRadius: 23,
-    flexDirection: "row",
-    alignItems: "center",
-    padding: 10,
-  },
-  searchResultImageBox: {
-    width: 62,
-    height: 76,
-    overflow: "hidden",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  searchResultImage: { width: 62, height: 76 },
-  spriteSearchImage: {
-    position: "absolute",
-    width: 151,
-    height: 103,
-    left: -28,
-    top: -14,
-  },
-  searchResultCopy: { flex: 1, gap: 4, paddingHorizontal: 12 },
-  searchResultName: { fontFamily: F.bold, fontSize: 16, color: C.ink },
-  searchSaveButton: {
-    width: 38,
-    height: 38,
-    borderRadius: 14,
-    backgroundColor: "rgba(255,255,255,.7)",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  searchEmptyState: {
-    alignItems: "center",
-    marginTop: 62,
-    gap: 10,
-  },
-  emptyTitle: { fontFamily: F.bold, fontSize: 18, color: C.ink },
-  emptyPrompt: { fontFamily: F.medium, fontSize: 13, color: C.teal },
-  requestDrinkButton: {
-    minWidth: 148,
-    height: 42,
-    borderRadius: 21,
-    marginTop: 4,
-    backgroundColor: C.red,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  requestPageContent: {
-    paddingHorizontal: 32,
-    paddingTop: 18,
-    paddingBottom: 40,
-  },
-  requestFormCard: {
-    borderRadius: 26,
-    padding: 24,
-    backgroundColor: "rgba(255,254,248,.94)",
-    alignItems: "stretch",
-  },
-  requestIconCircle: {
-    width: 60,
-    height: 60,
-    borderRadius: 30,
-    alignSelf: "center",
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "rgba(204,36,44,.1)",
-    marginBottom: 16,
-  },
-  requestFormTitle: {
-    fontFamily: F.display,
-    fontSize: 22,
-    color: C.red,
-    textAlign: "center",
-  },
-  requestFormCopy: {
-    fontFamily: F.regular,
-    fontSize: 12,
-    lineHeight: 17,
-    color: "rgba(32,26,27,.72)",
-    textAlign: "center",
-    marginTop: 10,
-    marginBottom: 24,
-  },
-  requestInputLabel: {
-    fontFamily: F.bold,
-    fontSize: 12,
-    color: C.ink,
-    marginBottom: 7,
-  },
-  requestNameInput: {
-    height: 50,
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: "rgba(43,73,89,.28)",
-    backgroundColor: "#fff",
-    paddingHorizontal: 15,
-    fontFamily: F.medium,
-    fontSize: 14,
-    color: C.ink,
-  },
-  requestSubmit: { height: 46, marginTop: 18 },
-  disabledButton: { opacity: 0.38 },
-  requestSuccess: {
-    marginTop: 16,
-    padding: 13,
-    borderRadius: 14,
-    backgroundColor: "rgba(4,178,100,.12)",
-    borderWidth: 1,
-    borderColor: "rgba(4,178,100,.28)",
-  },
-  requestSuccessTitle: { fontFamily: F.bold, fontSize: 12, color: C.green },
-  requestSuccessText: {
-    fontFamily: F.regular,
-    fontSize: 11,
-    lineHeight: 15,
-    color: C.ink,
-    marginTop: 3,
-  },
-  profileSearchCard: {
-    ...glass,
-    minHeight: 76,
-    borderRadius: 23,
-    flexDirection: "row",
-    alignItems: "center",
-    padding: 12,
-  },
-  profileSearchAvatar: { width: 50, height: 50, borderRadius: 25 },
-  grid: {
-    width: 374,
-    alignSelf: "center",
-    paddingTop: 20,
-    paddingBottom: 130,
-    gap: 22,
-  },
-  gridRow: {
-    width: 374,
-    gap: 22,
-  },
-  drinkCard: {
-    width: 110,
-    height: 187,
-    borderRadius: 16,
-    ...(Platform.OS === "android"
-      ? {
-          boxShadow: "0px 3px 8px rgba(0,0,0,0.25)",
-        }
-      : {
-          shadowColor: "#000",
-          shadowOpacity: 0.25,
-          shadowRadius: 8,
-          shadowOffset: { width: 0, height: 3 },
-          elevation: 6,
-        }),
-  },
-  drinkCardSurface: {
-    flex: 1,
-    borderRadius: 16,
-    overflow: "hidden",
-    backgroundColor:
-      Platform.OS === "android"
-        ? "rgba(242,249,229,.82)"
-        : "rgba(255,255,255,.1)",
-  },
-  drinkGlow: { ...StyleSheet.absoluteFill },
-  drinkImageFrame: {
-    width: 110,
-    height: 154,
-    overflow: "hidden",
-  },
-  drinkImage: { width: "100%", height: 154 },
-  spriteExploreImage: {
-    position: "absolute",
-    width: 424,
-    height: 286,
-    left: -99,
-    top: -61,
-  },
-  drinkLabel: {
-    height: 33,
-    backgroundColor: "rgba(255,255,255,.8)",
-    alignItems: "center",
-    paddingTop: 3,
-  },
-  drinkName: { fontFamily: F.bold, fontSize: 11, maxWidth: 100 },
-  savedMark: {
-    display: "none",
-    position: "absolute",
-    right: 6,
-    top: 5,
-    color: C.red,
-    fontSize: 16,
-  },
-  saveButton: {
-    position: "absolute",
-    right: 6,
-    top: 6,
-    width: 27,
-    height: 27,
-    borderRadius: 10,
-    backgroundColor: "rgba(255,255,255,.76)",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  nav: {
-    position: "absolute",
-    left: 33,
-    right: 33,
-    bottom: 34,
-    height: 80,
-    borderRadius: 24,
-    borderWidth: 0.35,
-    borderColor: "rgba(255,255,255,.5)",
-    ...(Platform.OS === "android"
-      ? {
-          backgroundColor: "rgba(74,105,108,.62)",
-          boxShadow: "0px 6px 6px rgba(0,0,0,0.34)",
-        }
-      : {
-          shadowColor: "#000",
-          shadowOpacity: 0.4,
-          shadowRadius: 6,
-          shadowOffset: { width: 0, height: 6 },
-          elevation: 10,
-        }),
-    overflow: "hidden",
-    flexDirection: "row",
-  },
-  navBlur: {
-    ...StyleSheet.absoluteFill,
-  },
-  navTint: {
-    ...StyleSheet.absoluteFill,
-  },
-  navHighlight: { ...StyleSheet.absoluteFill },
-  navItem: { flex: 1, alignItems: "center", justifyContent: "center" },
-  navActive: { backgroundColor: "rgba(0,0,0,.3)" },
-  navText: {
-    fontFamily: F.display,
-    fontSize: 16,
-    color: "#173746",
-    textShadowColor: "rgba(255,255,255,.3)",
-    textShadowOffset: { width: 0, height: 1 },
-    textShadowRadius: 1,
-  },
-  navTextActive: {
-    color: "#fff",
-    textShadowColor: "rgba(0,0,0,.24)",
-  },
-  listCard: {
-    height: 110,
-    borderRadius: 23,
-    marginBottom: 12,
-    ...(Platform.OS === "android"
-      ? {
-          boxShadow: "0px 4px 4px rgba(0,0,0,0.25)",
-        }
-      : {
-          shadowColor: "#000",
-          shadowOpacity: 0.25,
-          shadowRadius: 4,
-          shadowOffset: { width: 0, height: 4 },
-          elevation: 5,
-        }),
-  },
-  drinklistContent: {
-    width: 374,
-    alignSelf: "center",
-    paddingTop: 14,
-    paddingBottom: 130,
-  },
-  listCardSurface: {
-    flex: 1,
-    flexDirection: "row",
-    overflow: "hidden",
-    borderRadius: 23,
-    borderWidth: 0.35,
-    borderColor: "rgba(255,255,255,.5)",
-    backgroundColor:
-      Platform.OS === "android" ? "rgba(222,244,224,.8)" : "transparent",
-  },
-  listImageBox: {
-    width: 77,
-    backgroundColor: "rgba(244,250,228,.2)",
-    alignItems: "center",
-    justifyContent: "center",
-    overflow: "hidden",
-  },
-  listImage: { width: 56, height: 72 },
-  spriteListImage: {
-    position: "absolute",
-    width: 221,
-    height: 149,
-    left: -42,
-    top: -14,
-  },
-  listDetails: {
-    flex: 1,
-    paddingTop: 7,
-    paddingLeft: 12,
-    paddingRight: 4,
-  },
-  listMetaRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    marginTop: 7,
-  },
-  listTagsRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    marginTop: 11,
-  },
-  listActions: {
-    width: 54,
-    paddingTop: 16,
-    paddingRight: 21,
-    alignItems: "flex-end",
-    gap: 11,
-  },
-  smallButton: {
-    ...glass,
-    width: 33,
-    height: 33,
-    borderRadius: 12,
-    backgroundColor: "rgba(255,255,255,.8)",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  empty: {
-    fontFamily: F.medium,
-    textAlign: "center",
-    marginTop: 70,
-    color: "#666",
-  },
-  avatar: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    borderWidth: 0.5,
-    borderColor: "rgba(43,73,89,.28)",
-    backgroundColor: C.cream,
-  },
-  hero: {
-    ...glass,
-    height: 275,
-    marginHorizontal: 35,
-    borderRadius: 23,
-    backgroundColor: "rgba(250,255,242,.36)",
-    borderColor: "rgba(4,178,100,.18)",
-    position: "relative",
-    overflow: "hidden",
-  },
-  heroImage: {
-    position: "absolute",
-    left: 0,
-    right: 0,
-    top: 15,
-    width: "100%",
-    height: 240,
-  },
-  spriteHeroImage: {
-    width: 669,
-    height: 501,
-    left: -52,
-    right: undefined,
-    top: -78,
-  },
-  heroPill: { position: "absolute", left: 14, top: 14, zIndex: 2 },
-  detailCard: {
-    ...glass,
-    marginHorizontal: 32,
-    marginTop: 22,
-    marginBottom: 5,
-    borderRadius: 23,
-    padding: 21,
-    overflow: "hidden",
-  },
-  detailMeta: { gap: 3 },
-  officialTagsSection: { marginTop: 14, gap: 8 },
-  officialTagsWrap: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    alignItems: "center",
-    gap: 8,
-    width: "100%",
-  },
-  detailTitle: { fontFamily: F.bold, fontSize: 28, color: C.ink },
-  reviewCard: {
-    marginHorizontal: 32,
-    marginBottom: 14,
-    borderRadius: 16,
-    paddingBottom: 7,
-    backgroundColor: "rgba(4,178,100,.2)",
-    shadowColor: "#000",
-    shadowOpacity: 0.25,
-    shadowRadius: 4,
-    shadowOffset: { width: 0, height: 4 },
-    elevation: 5,
-  },
-  reviewFront: {
-    minHeight: 154,
-    borderRadius: 16,
-    padding: 20,
-    backgroundColor: C.cream,
-  },
-  reviewHeaderRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: 10,
-  },
-  reviewIdentity: {
-    flex: 1,
-    minWidth: 0,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-  },
-  reviewDetailContent: {
-    paddingHorizontal: 32,
-    paddingBottom: 130,
-  },
-  reviewDetailDrinkStrip: {
-    height: 84,
-    borderRadius: 20,
-    overflow: "hidden",
-    flexDirection: "row",
-    alignItems: "center",
-    paddingHorizontal: 14,
-    shadowColor: "#000",
-    shadowOpacity: 0.18,
-    shadowRadius: 4,
-    shadowOffset: { width: 0, height: 3 },
-  },
-  reviewDetailImageBox: {
-    width: 52,
-    height: 66,
-    overflow: "hidden",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  reviewDetailDrinkImage: { width: 48, height: 62 },
-  spriteReviewDetailImage: {
-    position: "absolute",
-    width: 190,
-    height: 128,
-    left: -46,
-    top: -28,
-  },
-  reviewDetailDrinkCopy: { flex: 1, gap: 4, marginLeft: 12 },
-  reviewDetailDepth: {
-    marginTop: 18,
-    paddingBottom: 8,
-    borderRadius: 20,
-    backgroundColor: "rgba(4,178,100,.2)",
-    shadowColor: "#000",
-    shadowOpacity: 0.24,
-    shadowRadius: 5,
-    shadowOffset: { width: 0, height: 4 },
-  },
-  reviewDetailCard: {
-    borderRadius: 20,
-    padding: 22,
-    backgroundColor: C.cream,
-  },
-  reviewDetailAvatar: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    borderWidth: 0.5,
-    borderColor: "rgba(43,73,89,.3)",
-    backgroundColor: C.cream,
-  },
-  reviewDetailText: {
-    fontFamily: F.regular,
-    fontSize: 15,
-    lineHeight: 21,
-    color: C.ink,
-    marginVertical: 22,
-  },
-  reviewDetailUploadedImage: {
-    width: "100%",
-    height: 190,
-    borderRadius: 18,
-    marginBottom: 18,
-    backgroundColor: "rgba(255,255,255,.55)",
-  },
-  reviewDetailFooter: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: 10,
-  },
-  reviewDetailLikeButton: {
-    minWidth: 46,
-    height: 32,
-    paddingHorizontal: 9,
-    borderRadius: 16,
-    backgroundColor: "rgba(204,36,44,.08)",
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 5,
-  },
-  reviewCommentsTitle: {
-    fontFamily: F.bold,
-    fontSize: 16,
-    color: C.ink,
-    marginTop: 26,
-    marginBottom: 10,
-  },
-  commentCard: {
-    minHeight: 72,
-    borderRadius: 18,
-    padding: 13,
-    marginBottom: 10,
-    backgroundColor: "rgba(4,178,100,.16)",
-    borderWidth: 0.5,
-    borderColor: "rgba(4,125,82,.28)",
-    shadowColor: "#000",
-    shadowOpacity: 0.14,
-    shadowRadius: 4,
-    shadowOffset: { width: 0, height: 2 },
-    flexDirection: "row",
-    gap: 10,
-  },
-  commentAvatar: {
-    width: 38,
-    height: 38,
-    borderRadius: 19,
-    borderWidth: 0.5,
-    borderColor: "rgba(43,73,89,.3)",
-    backgroundColor: C.cream,
-  },
-  commentCopy: { flex: 1, gap: 6 },
-  commentUserName: { fontFamily: F.bold, fontSize: 12, color: C.teal },
-  commentHeader: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-  },
-  reviewNoComments: {
-    fontFamily: F.medium,
-    fontSize: 12,
-    color: "rgba(32,26,27,.58)",
-    marginBottom: 12,
-  },
-  commentComposer: {
-    minHeight: 54,
-    borderRadius: 21,
-    padding: 6,
-    paddingLeft: 14,
-    marginTop: 8,
-    backgroundColor: "rgba(255,254,248,.94)",
-    borderWidth: 0.5,
-    borderColor: "rgba(43,73,89,.3)",
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-  },
-  commentInput: {
-    flex: 1,
-    height: 42,
-    fontFamily: F.medium,
-    fontSize: 12,
-    color: C.ink,
-    outlineStyle: "none",
-  } as any,
-  commentSubmit: {
-    minWidth: 68,
-    height: 42,
-    borderRadius: 18,
-    backgroundColor: C.red,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  commentSubmitDisabled: {
-    opacity: 1,
-    backgroundColor: "rgba(204,36,44,.72)",
-  },
-  reviewDrink: {
-    height: 99,
-    marginHorizontal: 33,
-    marginTop: 10,
-    borderRadius: 23,
-    flexDirection: "row",
-    alignItems: "center",
-    paddingHorizontal: 15,
-  },
-  reviewDrinkImageBox: {
-    width: 55,
-    height: 76,
-    marginRight: 8,
-    overflow: "hidden",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  reviewDrinkImage: { width: 55, height: 76 },
-  spriteReviewImage: {
-    position: "absolute",
-    width: 212,
-    height: 159,
-    left: -48,
-    top: -30,
-  },
-  ratingCard: {
-    height: 100,
-    margin: 22,
-    marginHorizontal: 33,
-    borderRadius: 23,
-    padding: 20,
-    gap: 10,
-  },
-  ratingRow: { flexDirection: "row", alignItems: "center", gap: 12 },
-  starPicker: { flexDirection: "row", alignItems: "center", gap: 2 },
-  halfStarFill: {
-    position: "absolute",
-    left: 0,
-    top: 0,
-    height: 35,
-    overflow: "hidden",
-  },
-  filledStar: { position: "absolute", left: 0, top: 0 },
-  halfStarHitArea: {
-    ...StyleSheet.absoluteFill,
-    flexDirection: "row",
-  },
-  halfStarButton: { flex: 1 },
-  ratingNumber: { fontFamily: F.bold, fontSize: 36, color: C.ink },
-  formCard: {
-    minHeight: 264,
-    marginHorizontal: 33,
-    borderRadius: 23,
-    padding: 12,
-  },
-  reviewInput: {
-    height: 209,
-    marginTop: 8,
-    borderRadius: 16,
-    backgroundColor: "rgba(255,255,255,.8)",
-    padding: 12,
-    fontFamily: F.regular,
-    fontSize: 12,
-  },
-  reviewUploadPreview: {
-    width: "100%",
-    height: 150,
-    marginTop: 12,
-    borderRadius: 16,
-    backgroundColor: "rgba(255,255,255,.7)",
-  },
-  reviewPhotoButton: {
-    minHeight: 42,
-    marginTop: 12,
-    marginBottom: 2,
-    paddingHorizontal: 16,
-    borderRadius: 21,
-    borderWidth: 0.75,
-    borderColor: "rgba(43,73,89,.35)",
-    backgroundColor: "rgba(255,255,255,.68)",
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 8,
-  },
-  notesCard: {
-    margin: 22,
-    marginHorizontal: 33,
-    borderRadius: 23,
-    padding: 20,
-  },
-  customNoteRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    marginTop: 10,
-  },
-  customNoteInput: {
-    flex: 1,
-    height: 30,
-    borderRadius: 15,
-    paddingHorizontal: 12,
-    backgroundColor: "rgba(255,255,255,.52)",
-    borderWidth: 1,
-    borderColor: "rgba(0,0,0,.25)",
-    fontFamily: F.medium,
-    fontSize: 10,
-  },
-  addNoteButton: {
-    height: 28,
-    minWidth: 62,
-    borderRadius: 14,
-    paddingHorizontal: 13,
-    backgroundColor: C.teal,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  notes: { flexDirection: "row", flexWrap: "wrap", gap: 10, marginTop: 12 },
-  noteChip: {
-    height: 24,
-    minWidth: 65,
-    paddingHorizontal: 13,
-    borderRadius: 15,
-    borderWidth: 1,
-    borderColor: "rgba(43,73,89,.55)",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  noteChipSelected: {
-    backgroundColor: "rgba(255,119,125,.3)",
-    borderColor: "rgba(150,0,0,.54)",
-  },
-  addNoteChip: {
-    height: 24,
-    minWidth: 65,
-    paddingHorizontal: 13,
-    borderRadius: 15,
-    backgroundColor: C.teal,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  commonTagsSection: {
-    marginHorizontal: 32,
-    marginBottom: 14,
-    paddingHorizontal: 2,
-    gap: 6,
-  },
-  commonTagsText: {
-    fontFamily: F.medium,
-    fontSize: 12,
-    lineHeight: 18,
-    color: "#960000",
-  },
-  profileCard: {
-    height: 77,
-    marginHorizontal: 33,
-    marginTop: 21,
-    borderRadius: 23,
-    paddingHorizontal: 20,
-    paddingVertical: 11,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 12,
-    overflow: "hidden",
-  },
-  profileAvatar: { width: 55, height: 55, borderRadius: 28 },
-  profileDetails: {
-    flex: 1,
-    height: 55,
-    justifyContent: "center",
-    gap: 2,
-  },
-  profileHandle: {
-    fontFamily: F.bold,
-    fontSize: 10,
-    lineHeight: 11,
-    color: C.ink,
-  },
-  profileEditWrap: {
-    height: 55,
-    justifyContent: "center",
-    alignItems: "center",
-  },
-  profileAction: {
-    minWidth: 44,
-    height: 29,
-    paddingHorizontal: 7,
-    borderRadius: 10,
-    borderWidth: 1.3,
-    borderColor: "rgba(4,178,100,.3)",
-    backgroundColor: "rgba(4,178,100,.1)",
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 2,
-  },
-  profileActionFollowing: {
-    backgroundColor: C.green,
-    borderColor: C.green,
-  },
-  profileActionText: {
-    fontFamily: F.medium,
-    fontSize: 12,
-    lineHeight: 15,
-    color: C.green,
-  },
-  profileActionTextFollowing: { color: C.cream },
-  settingsContent: { paddingHorizontal: 32, paddingBottom: 40 },
-  settingsDetailContent: { paddingHorizontal: 32, paddingBottom: 40 },
-  settingsDetailCard: {
-    borderRadius: 23,
-    padding: 20,
-    overflow: "hidden",
-  },
-  settingsDetailTitle: {
-    fontFamily: F.bold,
-    fontSize: 18,
-    color: C.ink,
-    marginBottom: 7,
-  },
-  settingsDetailCopy: {
-    fontFamily: F.regular,
-    fontSize: 12,
-    lineHeight: 18,
-    color: "rgba(32,26,27,.72)",
-    marginBottom: 18,
-  },
-  settingsInputLabel: {
-    fontFamily: F.bold,
-    fontSize: 11,
-    color: C.ink,
-    marginBottom: 6,
-  },
-  settingsInput: {
-    height: 48,
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: "rgba(43,73,89,.2)",
-    backgroundColor: "rgba(255,254,248,.92)",
-    paddingHorizontal: 14,
-    marginBottom: 14,
-    fontFamily: F.medium,
-    fontSize: 13,
-    color: C.ink,
-    outlineStyle: "none",
-  } as any,
-  settingsVerifiedRow: {
-    alignSelf: "flex-start",
-    borderRadius: 12,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    backgroundColor: "rgba(4,178,100,.1)",
-    marginBottom: 18,
-  },
-  settingsVerifiedText: {
-    fontFamily: F.bold,
-    fontSize: 10,
-    color: C.green,
-  },
-  settingsPrimaryButton: {
-    height: 46,
-    borderRadius: 18,
-    backgroundColor: C.red,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  settingsDataSummary: {
-    borderRadius: 16,
-    padding: 14,
-    gap: 7,
-    backgroundColor: "rgba(255,254,248,.78)",
-    borderWidth: 1,
-    borderColor: "rgba(43,73,89,.1)",
-    marginBottom: 14,
-  },
-  settingsSecondaryButton: {
-    height: 46,
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: "rgba(43,73,89,.24)",
-    backgroundColor: "rgba(255,254,248,.78)",
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 7,
-    marginBottom: 10,
-  },
-  settingsSecondaryText: {
-    fontFamily: F.bold,
-    fontSize: 12,
-    color: C.teal,
-  },
-  settingsDeleteButton: {
-    height: 46,
-    borderRadius: 16,
-    backgroundColor: "rgba(204,36,44,.09)",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  settingsDeleteText: { fontFamily: F.bold, fontSize: 12, color: C.red },
-  settingsAboutLogo: {
-    fontFamily: F.display,
-    fontSize: 24,
-    color: C.red,
-    textAlign: "center",
-    marginBottom: 18,
-  },
-  settingsAccountCard: {
-    height: 82,
-    borderRadius: 23,
-    paddingHorizontal: 15,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 12,
-  },
-  settingsAvatar: { width: 55, height: 55, borderRadius: 28 },
-  settingsAccountCopy: { flex: 1, gap: 5, justifyContent: "center" },
-  settingsSectionTitle: {
-    fontFamily: F.bold,
-    fontSize: 12,
-    color: C.ink,
-    marginTop: 22,
-    marginBottom: 8,
-  },
-  settingsGroup: {
-    backgroundColor: "rgba(255,254,248,.86)",
-    borderRadius: 20,
-    overflow: "hidden",
-    borderWidth: 1,
-    borderColor: "rgba(43,73,89,.12)",
-  },
-  settingsOption: {
-    minHeight: 72,
-    paddingHorizontal: 14,
-    paddingVertical: 11,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 11,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: "rgba(43,73,89,.12)",
-  },
-  settingsDangerOption: { borderBottomWidth: 0 },
-  settingsOptionIcon: {
-    width: 38,
-    height: 38,
-    borderRadius: 13,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "rgba(43,73,89,.08)",
-  },
-  settingsDangerIcon: { backgroundColor: "rgba(204,36,44,.08)" },
-  settingsOptionCopy: { flex: 1, gap: 3 },
-  settingsOptionTitle: { fontFamily: F.bold, fontSize: 13, color: C.ink },
-  settingsOptionSubtitle: {
-    fontFamily: F.regular,
-    fontSize: 10,
-    lineHeight: 13,
-    color: "rgba(32,26,27,.62)",
-  },
-  tab: {
-    ...glass,
-    height: 34,
-    flex: 1,
-    marginTop: 10,
-    borderRadius: 23,
-    alignItems: "center",
-    justifyContent: "center",
-    overflow: "hidden",
-  },
-  tabActive: { backgroundColor: C.red },
-  progressCard: {
-    height: 66,
-    margin: 12,
-    marginHorizontal: 33,
-    borderRadius: 20,
-    padding: 12,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 12,
-  },
-  progressCircle: {
-    width: 44,
-    height: 44,
-    alignItems: "center",
-    justifyContent: "center",
-    position: "relative",
-  },
-  progressText: {
-    position: "absolute",
-    fontFamily: F.medium,
-    fontSize: 10,
-    color: C.ink,
-  },
-  badges: {
-    paddingHorizontal: 24,
-    flexDirection: "row",
-    flexWrap: "wrap",
-    justifyContent: "space-between",
-    rowGap: 0,
-  },
-  badgeItem: {
-    width: "31%",
-    height: 120,
-    alignItems: "center",
-  },
-  badgeLocked: { opacity: 0.42 },
-  badgeLabel: {
-    width: 105,
-    textAlign: "center",
-    marginTop: 2,
-  },
-  badgeComposite: { width: 88, height: 105 },
-  badgeCompositeTall: { width: 88, height: 121 },
-  stats: {
-    width: 374,
-    alignSelf: "center",
-    flexDirection: "row",
-    gap: 8,
-    marginTop: 8,
-  },
-  statsThree: { gap: 8 },
-  stat: {
-    height: 88,
-    flex: 1,
-    minWidth: 0,
-    borderRadius: 23,
-    alignItems: "center",
-    justifyContent: "center",
-    overflow: "hidden",
-    backgroundColor:
-      Platform.OS === "android" ? "rgba(222,244,224,.78)" : "transparent",
-    ...(Platform.OS === "android"
-      ? {
-          boxShadow: "0px 4px 4px rgba(0,0,0,0.25)",
-        }
-      : {
-          shadowColor: "#000",
-          shadowOpacity: 0.25,
-          shadowRadius: 4,
-          shadowOffset: { width: 0, height: 4 },
-          elevation: 5,
-        }),
-  },
-  statNumber: { fontFamily: F.bold, fontSize: 25 },
-  statThree: { flex: 1 },
-  receiptWrap: {
-    width: 374,
-    marginHorizontal: 33,
-    alignSelf: "center",
-    shadowColor: "#000",
-    shadowOpacity: 0.12,
-    shadowRadius: 3,
-    shadowOffset: { width: 0, height: 3 },
-  },
-  receipt: {
-    width: "100%",
-    minHeight: 405,
-    backgroundColor: C.cream,
-    padding: 20,
-    position: "relative",
-  },
-  receiptItem: { marginTop: 16, paddingBottom: 16 },
-  receiptItemDivider: {
-    borderBottomWidth: 1,
-    borderBottomColor: "rgba(32,26,27,.12)",
-  },
-  receiptItemCopy: { flex: 1, minWidth: 0, gap: 2 },
-  receiptEditButton: {
-    width: 24,
-    height: 24,
-    borderRadius: 10,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "rgba(204,36,44,.07)",
-  },
-  receiptReviewText: {
-    fontFamily: F.regular,
-    fontSize: 12,
-    lineHeight: 15,
-    color: C.ink,
-    marginLeft: 30,
-    marginTop: 5,
-  },
-  receiptRating: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    flexShrink: 0,
-    gap: 5,
-  },
-  receiptStars: { color: "#e3a000", fontSize: 12 },
-  receiptRatingNumber: {
-    fontFamily: F.bold,
-    fontSize: 10,
-    color: "rgba(32,26,27,.62)",
-  },
-  receiptShareButton: {
-    position: "absolute",
-    right: 14,
-    top: 14,
-    height: 30,
-    paddingHorizontal: 10,
-    borderRadius: 15,
-    borderWidth: 1,
-    borderColor: "rgba(204,36,44,.4)",
-    backgroundColor: "rgba(204,36,44,.08)",
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 5,
-    zIndex: 2,
-  },
-  receiptShareText: { fontFamily: F.bold, fontSize: 10, color: C.red },
-  receiptLogo: {
-    fontFamily: F.display,
-    fontSize: 18,
-    textAlign: "center",
-    marginVertical: 16,
-  },
-  dash: {
-    borderTopWidth: 1,
-    borderStyle: "dashed",
-    borderColor: "#ddd",
-    marginBottom: 16,
-  },
-  feedContent: { paddingBottom: 18 },
-  feedSectionHeader: {
-    marginHorizontal: 32,
-    marginTop: 6,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-  },
-  feedMoreButton: {
-    minHeight: 28,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 3,
-  },
-  feedMoreArrowExpanded: { transform: [{ rotate: "180deg" }] },
-  friendStrip: {
-    paddingHorizontal: 22,
-    gap: 2,
-    marginTop: 12,
-  },
-  friendDrink: { width: 77, alignItems: "center" },
-  friendComposite: { width: 77, height: 120 },
-  friendCompactCard: {
-    width: 77,
-    height: 120,
-    borderRadius: 9,
-    ...(Platform.OS === "android"
-      ? {
-          boxShadow: "0px 3px 5px rgba(0,0,0,0.25)",
-        }
-      : {
-          shadowColor: "#000",
-          shadowOpacity: 0.25,
-          shadowRadius: 5,
-          shadowOffset: { width: 0, height: 3 },
-          elevation: 5,
-        }),
-  },
-  friendCompactSurface: {
-    flex: 1,
-    borderRadius: 9,
-    overflow: "hidden",
-    backgroundColor:
-      Platform.OS === "android"
-        ? "rgba(242,249,229,.86)"
-        : "rgba(255,255,255,.1)",
-  },
-  friendCompactImageFrame: {
-    width: 77,
-    height: 92,
-    overflow: "hidden",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  friendCompactImage: {
-    width: "85%",
-    height: "85%",
-    backgroundColor: "transparent",
-  },
-  friendCompactLabel: {
-    width: 77,
-    height: 28,
-    paddingHorizontal: 3,
-    paddingTop: 2,
-    backgroundColor: "rgba(255,255,255,.8)",
-    alignItems: "center",
-  },
-  friendCompactName: {
-    maxWidth: 71,
-    fontFamily: F.bold,
-    fontSize: 7,
-    lineHeight: 9,
-    textAlign: "center",
-  },
-  friendCompactType: {
-    maxWidth: 71,
-    fontFamily: F.medium,
-    fontSize: 6.5,
-    lineHeight: 8,
-    textAlign: "center",
-  },
-  friendCount: {
-    fontFamily: F.medium,
-    fontSize: 10,
-    color: C.ink,
-  },
-  friendSocialRow: {
-    minHeight: 13,
-    marginTop: 6,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 4,
-  },
-  friendAvatarStack: { flexDirection: "row", alignItems: "center" },
-  friendMiniAvatar: {
-    width: 12,
-    height: 12,
-    borderRadius: 6,
-    borderWidth: 0.35,
-    borderColor: C.cream,
-  },
-  friendMiniAvatarOverlap: { marginLeft: -4.5 },
-  activityTitle: {
-    fontFamily: F.bold,
-    fontSize: 14,
-    color: C.ink,
-    marginHorizontal: 32,
-    marginTop: 29,
-  },
-  activityGroup: {
-    fontFamily: F.regular,
-    fontSize: 12,
-    lineHeight: 15,
-    color: C.ink,
-    marginHorizontal: 33,
-    marginTop: 5,
-  },
-  activity: {
-    marginHorizontal: 33,
-    marginTop: 10,
-    borderRadius: 23,
-    paddingHorizontal: 21,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
-  },
-  activityTall: { height: 66 },
-  activityShort: { height: 55 },
-  activityAvatar: {
-    width: 33,
-    height: 33,
-    borderRadius: 17,
-  },
-  activityCopy: { flex: 1 },
-  activityAction: {
-    fontFamily: F.medium,
-    fontSize: 10,
-    color: C.red,
-    marginTop: 1,
-  },
-  activityQuote: {
-    fontFamily: F.regular,
-    fontStyle: "italic",
-    color: C.ink,
-  },
-  activityTime: {
-    fontFamily: F.regular,
-    fontSize: 10,
-    color: "rgba(0,0,0,.7)",
-  },
-  confirmOverlay: {
-    flex: 1,
-    alignItems: "center",
-    justifyContent: "center",
-    paddingHorizontal: 32,
-    backgroundColor: "rgba(32,26,27,.38)",
-  },
-  logoutConfirmCard: {
-    width: "100%",
-    maxWidth: 360,
-    borderRadius: 24,
-    padding: 24,
-    backgroundColor: C.cream,
-    borderWidth: 1,
-    borderColor: "rgba(43,73,89,.14)",
-    shadowColor: "#000",
-    shadowOpacity: 0.2,
-    shadowRadius: 12,
-    shadowOffset: { width: 0, height: 6 },
-    elevation: 8,
-  },
-  logoutConfirmTitle: {
-    fontFamily: F.display,
-    fontSize: 20,
-    color: C.red,
-    textAlign: "center",
-  },
-  logoutConfirmCopy: {
-    marginTop: 10,
-    fontFamily: F.regular,
-    fontSize: 13,
-    color: C.ink,
-    textAlign: "center",
-  },
-  logoutConfirmActions: {
-    marginTop: 22,
-    flexDirection: "row",
-    gap: 10,
-  },
-  logoutCancelButton: {
-    flex: 1,
-    height: 44,
-    borderRadius: 22,
-    alignItems: "center",
-    justifyContent: "center",
-    borderWidth: 1,
-    borderColor: "rgba(43,73,89,.28)",
-    backgroundColor: "rgba(255,255,255,.72)",
-  },
-  logoutConfirmButton: {
-    flex: 1,
-    height: 44,
-    borderRadius: 22,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 7,
-    backgroundColor: C.red,
-  },
-  modalWrap: {
-    flex: 1,
-    justifyContent: "flex-end",
-    alignItems: "center",
-    backgroundColor: "rgba(0,0,0,.2)",
-  },
-  onboard: {
-    width: "100%",
-    maxWidth: FIGMA_FRAME_WIDTH,
-    backgroundColor: "#fffef8",
-    borderTopLeftRadius: 30,
-    borderTopRightRadius: 30,
-    paddingHorizontal: 28,
-    paddingTop: 16,
-    paddingBottom: 24,
-    gap: 10,
-    overflow: "hidden",
-    alignItems: "center",
-  },
-  handle: {
-    width: 46,
-    height: 5,
-    borderRadius: 3,
-    backgroundColor: "#aaa",
-    alignSelf: "center",
-  },
-  onboardTitle: {
-    fontFamily: F.display,
-    fontSize: 20,
-    color: C.red,
-    marginTop: 2,
-    width: "100%",
-    textAlign: "center",
-  },
-  onboardAge: {
-    width: "100%",
-    fontFamily: F.bold,
-    fontSize: 14,
-    color: C.ink,
-    textAlign: "center",
-  },
-  onboardCopy: {
-    width: "100%",
-    fontFamily: F.regular,
-    fontSize: 11,
-    lineHeight: 15,
-    color: "rgba(32,26,27,.72)",
-    marginBottom: 2,
-    textAlign: "center",
-  },
-  socialButton: {
-    width: "100%",
-    height: 44,
-    borderRadius: 22,
-    borderWidth: 1,
-    borderColor: "rgba(43,73,89,.25)",
-    backgroundColor: "rgba(255,255,255,.82)",
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 10,
-  },
-  socialButtonDark: { backgroundColor: C.ink, borderColor: C.ink },
-  socialButtonText: { fontFamily: F.bold, fontSize: 13, color: C.ink },
-  createAccountButton: {
-    width: "100%",
-    height: 42,
-    borderRadius: 21,
-    borderWidth: 1.5,
-    borderColor: C.red,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 8,
-  },
-  createAccountText: { fontFamily: F.bold, fontSize: 13, color: C.red },
-  onboardControl: { width: "100%" },
-  textButton: {
-    width: "100%",
-    height: 28,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  textButtonText: { fontFamily: F.medium, fontSize: 11, color: C.teal },
-  input: {
-    width: "100%",
-    height: 44,
-    borderRadius: 16,
-    backgroundColor: "rgba(255,255,255,.8)",
-    paddingHorizontal: 15,
-    fontFamily: F.regular,
-  },
-  splash: {
-    flex: 1,
-    height: Platform.OS === "web" ? FIGMA_FRAME_HEIGHT : "100%",
-    maxHeight: FIGMA_FRAME_HEIGHT,
-    minHeight: 0,
-    width: Platform.OS === "web" ? FIGMA_FRAME_WIDTH : "100%",
-    maxWidth: FIGMA_FRAME_WIDTH,
-    marginHorizontal: "auto",
-    backgroundColor: "#f30",
-    overflow: "hidden",
-  },
-  splashImage: {
-    ...StyleSheet.absoluteFill,
-    width: "100%",
-    height: "100%",
-    ...(Platform.OS === "web"
-      ? ({ objectFit: "cover", objectPosition: "center top" } as any)
-      : {}),
-  },
-  splashShade: {
-    ...StyleSheet.absoluteFill,
-    backgroundColor: "rgba(255,50,0,.06)",
-  },
-  splashTitle: {
-    position: "absolute",
-    left: 0,
-    right: 0,
-    top: "30%",
-    fontFamily: F.display,
-    fontSize: 52,
-    color: "#e9fae8",
-    textAlign: "center",
-  },
-});

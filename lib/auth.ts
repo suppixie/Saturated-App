@@ -1,3 +1,4 @@
+import type { OAuthAuthorizationDetails } from "@supabase/supabase-js";
 import { Linking, Platform } from "react-native";
 
 import { supabase } from "./supabase";
@@ -24,6 +25,7 @@ export async function signUpWithEmail(
   displayName: string,
   email: string,
   password: string,
+  dateOfBirth: string,
 ) {
   const client = requireSupabase();
   const { data, error } = await client.auth.signUp({
@@ -31,10 +33,18 @@ export async function signUpWithEmail(
     password,
     options: {
       emailRedirectTo: getRedirectUrl(),
-      data: { full_name: displayName.trim() },
+      data: {
+        full_name: displayName.trim(),
+        date_of_birth: dateOfBirth,
+      },
     },
   });
   if (error) throw error;
+  if (data.user && data.user.identities?.length === 0) {
+    throw new Error(
+      "An account with this email already exists. Choose sign in instead.",
+    );
+  }
   return data;
 }
 
@@ -44,11 +54,28 @@ export async function signInWithEmail(email: string, password: string) {
     email: email.trim().toLowerCase(),
     password,
   });
-  if (error) throw error;
+  if (error) {
+    if (error.message.toLowerCase().includes("email not confirmed")) {
+      throw new Error(
+        "Confirm your email using the link Supabase sent you, then sign in again.",
+      );
+    }
+    throw error;
+  }
   return data;
 }
 
 export async function signInWithProvider(provider: "google" | "apple") {
+  const providerName = provider === "google" ? "Google" : "Apple";
+  const providerEnabled =
+    provider === "google"
+      ? process.env.EXPO_PUBLIC_GOOGLE_AUTH_ENABLED === "true"
+      : process.env.EXPO_PUBLIC_APPLE_AUTH_ENABLED === "true";
+  if (!providerEnabled) {
+    throw new Error(
+      `${providerName} sign-in still needs to be enabled in Supabase. Use email sign-in for now.`,
+    );
+  }
   const client = requireSupabase();
   const redirectTo = getRedirectUrl();
   const { data, error } = await client.auth.signInWithOAuth({
@@ -58,7 +85,17 @@ export async function signInWithProvider(provider: "google" | "apple") {
       skipBrowserRedirect: Platform.OS !== "web",
     },
   });
-  if (error) throw error;
+  if (error) {
+    if (
+      error.message.toLowerCase().includes("not enabled") ||
+      error.message.toLowerCase().includes("unsupported provider")
+    ) {
+      throw new Error(
+        `${providerName} sign-in is not enabled in Supabase yet. Use email sign-in for now.`,
+      );
+    }
+    throw error;
+  }
   if (Platform.OS !== "web" && data.url) {
     await Linking.openURL(data.url);
   }
@@ -87,4 +124,35 @@ export async function handleAuthCallback(url: string) {
     return data.session;
   }
   return null;
+}
+
+export type OAuthConsentRequest = OAuthAuthorizationDetails;
+
+export async function loadOAuthConsentRequest(authorizationId: string) {
+  const client = requireSupabase();
+  const { data, error } =
+    await client.auth.oauth.getAuthorizationDetails(authorizationId);
+  if (error) throw error;
+  if (!data) throw new Error("This authorization request is no longer valid.");
+  return data;
+}
+
+export async function answerOAuthConsentRequest(
+  authorizationId: string,
+  decision: "approve" | "deny",
+) {
+  const client = requireSupabase();
+  const response =
+    decision === "approve"
+      ? await client.auth.oauth.approveAuthorization(authorizationId, {
+          skipBrowserRedirect: true,
+        })
+      : await client.auth.oauth.denyAuthorization(authorizationId, {
+          skipBrowserRedirect: true,
+        });
+  if (response.error) throw response.error;
+  if (!response.data?.redirect_url) {
+    throw new Error("Supabase did not return an authorization redirect.");
+  }
+  return response.data.redirect_url;
 }

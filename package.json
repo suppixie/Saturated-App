@@ -33,7 +33,9 @@
     "android": "expo start --android",
     "ios": "expo start --ios",
     "web": "expo start --web",
-    "catalogue:migration": "node scripts/generate-beverage-migration.mjs"
+    "web:oauth": "expo start --web --port 3000",
+    "catalogue:migration": "node scripts/generate-beverage-migration.mjs",
+    "catalogue:images": "powershell -ExecutionPolicy Bypass -File scripts/extract-catalogue-images.ps1"
   },
   "private": true
 }

@@ -8,6 +8,7 @@ export type DatabaseProfile = {
   display_name: string;
   bio: string;
   avatar_url: string | null;
+  date_of_birth?: string | null;
   birth_verified_at: string | null;
   created_at: string;
   follower_count?: number;
@@ -100,7 +101,7 @@ export async function loadProfiles() {
     client()
       .from("profiles")
       .select(
-        "id,username,display_name,bio,avatar_url,birth_verified_at,created_at",
+        "id,username,display_name,bio,avatar_url,date_of_birth,birth_verified_at,created_at",
       )
       .order("display_name"),
     client().from("follows").select("following_id"),
@@ -122,7 +123,7 @@ export async function loadCurrentProfile(userId: string) {
   const response = await client()
     .from("profiles")
     .select(
-      "id,username,display_name,bio,avatar_url,birth_verified_at,created_at",
+      "id,username,display_name,bio,avatar_url,date_of_birth,birth_verified_at,created_at",
     )
     .eq("id", userId)
     .single();
@@ -150,7 +151,7 @@ export async function updateCurrentProfile(
     })
     .eq("id", user.id)
     .select(
-      "id,username,display_name,bio,avatar_url,birth_verified_at,created_at",
+      "id,username,display_name,bio,avatar_url,date_of_birth,birth_verified_at,created_at",
     )
     .single();
   const profile = result(
@@ -168,6 +169,24 @@ export async function updateCurrentProfile(
     result(authResponse.data, authResponse.error);
   }
   return profile;
+}
+
+export async function updateCurrentDateOfBirth(
+  userId: string,
+  dateOfBirth: string,
+) {
+  const response = await client()
+    .from("profiles")
+    .update({
+      date_of_birth: dateOfBirth,
+      birth_verified_at: new Date().toISOString(),
+    })
+    .eq("id", userId)
+    .select(
+      "id,username,display_name,bio,avatar_url,date_of_birth,birth_verified_at,created_at",
+    )
+    .single();
+  return result(response.data, response.error) as DatabaseProfile;
 }
 
 export async function loadReviews() {
