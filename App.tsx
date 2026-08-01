@@ -55,6 +55,7 @@ import {
   Easing,
   FlatList,
   Image,
+  ImageStyle,
   ImageSourcePropType,
   KeyboardAvoidingView,
   Linking,
@@ -63,6 +64,7 @@ import {
   Pressable,
   ScrollView,
   Share,
+  StyleProp,
   Text,
   TextInput,
   useWindowDimensions,
@@ -106,7 +108,6 @@ import {
   updateCurrentDateOfBirth,
   updateCurrentProfile,
   uploadAvatar,
-  uploadReviewImage,
 } from "./lib/database";
 import { isSupabaseConfigured, supabase } from "./lib/supabase";
 import { catalogueImages } from "./src/data/catalogueImages";
@@ -139,6 +140,8 @@ import type {
 
 const STORAGE_KEY = "saturated-state-v7";
 const PENDING_BIRTH_DATE_KEY = "saturated-pending-date-of-birth";
+const PENDING_AVATAR_URI_KEY = "saturated-pending-avatar-uri";
+const PENDING_USERNAME_KEY = "saturated-pending-username";
 
 function createNoisePath(
   count: number,
@@ -178,7 +181,6 @@ const BACKGROUND_NOISE_LIGHT = createNoisePath(
   BACKGROUND_NOISE_TILE,
 );
 
-const fallbackAvatar = require("./assets/people/mark.png");
 const transparentDrinkImage = {
   uri: "data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=",
 } as ImageSourcePropType;
@@ -249,7 +251,7 @@ function reviewFromDatabase(review: DatabaseReview): Review {
     drinkId: review.beverage_id,
     userId: review.user_id,
     user: review.display_name || review.username || "Saturated User",
-    avatar: review.avatar_url ? { uri: review.avatar_url } : fallbackAvatar,
+    avatar: review.avatar_url ? { uri: review.avatar_url } : undefined,
     rating: Number(review.rating),
     text: review.body,
     tags: review.flavour_tags || [],
@@ -276,7 +278,7 @@ function profileFromDatabase(profile: DatabaseProfile): SearchProfile {
       year: "numeric",
     }),
     buddies: profile.follower_count || 0,
-    avatar: profile.avatar_url ? { uri: profile.avatar_url } : fallbackAvatar,
+    avatar: profile.avatar_url ? { uri: profile.avatar_url } : undefined,
   };
 }
 
@@ -288,7 +290,7 @@ function commentFromDatabase(comment: DatabaseComment): ReviewComment {
     id: comment.id,
     userId: comment.user_id,
     user: profile?.display_name || profile?.username || "Saturated User",
-    avatar: profile?.avatar_url ? { uri: profile.avatar_url } : fallbackAvatar,
+    avatar: profile?.avatar_url ? { uri: profile.avatar_url } : undefined,
     text: comment.body,
     date: new Date(comment.created_at).toLocaleDateString("en-GB", {
       day: "numeric",
@@ -331,6 +333,56 @@ function GlassLayers({
         style={[s.glassInnerEdge, { borderRadius: radius }]}
       />
     </>
+  );
+}
+
+function initialsForName(name: string) {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  if (!parts.length) return "SU";
+  const first = parts[0][0] || "";
+  const last = parts.length > 1 ? parts[parts.length - 1][0] || "" : "";
+  return `${first}${last}`.toUpperCase();
+}
+
+function usernameFromEmail(email?: string | null) {
+  const localPart = email?.split("@")[0]?.trim().toLowerCase() || "user";
+  const normalized = localPart.replace(/[^a-z0-9._]/g, "");
+  return normalized || "user";
+}
+
+function UserAvatar({
+  name,
+  source,
+  size,
+  style,
+}: {
+  name: string;
+  source?: ImageSourcePropType;
+  size: number;
+  style?: StyleProp<ImageStyle>;
+}) {
+  const dimensions = { width: size, height: size, borderRadius: size / 2 };
+  if (source) {
+    return (
+      <Image
+        accessibilityLabel={`${name} profile picture`}
+        source={source}
+        style={[dimensions, style]}
+        resizeMode="cover"
+      />
+    );
+  }
+  return (
+    <View
+      accessibilityLabel={`${name} initials profile picture`}
+      style={[s.initialsAvatar, dimensions, style]}
+    >
+      <Text
+        style={[s.initialsAvatarText, { fontSize: Math.max(10, size * 0.31) }]}
+      >
+        {initialsForName(name)}
+      </Text>
+    </View>
   );
 }
 
@@ -779,6 +831,16 @@ function validatedDateOfBirth(value: string) {
     .padStart(2, "0")}-${day.toString().padStart(2, "0")}`;
 }
 
+type EmailAccountDetails = {
+  firstName: string;
+  lastName: string;
+  username: string;
+  email: string;
+  password: string;
+  dateOfBirth: string;
+  avatarUri?: string;
+};
+
 function Onboarding({
   visible,
   onEmailSignIn,
@@ -792,26 +854,32 @@ function Onboarding({
     dateOfBirth: string,
   ) => Promise<void>;
   onEmailSignUp: (
-    name: string,
-    email: string,
-    password: string,
-    dateOfBirth: string,
+    details: EmailAccountDetails,
   ) => Promise<"signed-in" | "check-email">;
   onProvider: (
     provider: "google" | "apple",
     dateOfBirth: string,
   ) => Promise<void>;
 }) {
-  const [name, setName] = useState("");
+  const [firstName, setFirstName] = useState("");
+  const [lastName, setLastName] = useState("");
+  const [chosenUsername, setChosenUsername] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [dateOfBirth, setDateOfBirth] = useState("");
+  const [avatarUri, setAvatarUri] = useState<string>();
   const [notice, setNotice] = useState("");
   const [noticeTone, setNoticeTone] = useState<"success" | "error">("success");
   const [busy, setBusy] = useState(false);
   const [accountMode, setAccountMode] = useState<"social" | "email" | "create">(
     "social",
   );
+  useEffect(() => {
+    if (!visible) {
+      setAccountMode("social");
+      setNotice("");
+    }
+  }, [visible]);
   const run = async (operation: () => Promise<void>) => {
     try {
       setBusy(true);
@@ -837,8 +905,19 @@ function Onboarding({
   const finishEmail = async () => {
     if (!email.trim() || !email.includes("@"))
       return showFormError("Enter a valid email address.");
-    if (accountMode === "create" && !name.trim())
-      return showFormError("Enter your name.");
+    if (accountMode === "create" && (!firstName.trim() || !lastName.trim()))
+      return showFormError("Enter your first and last name.");
+    const normalizedUsername = chosenUsername
+      .trim()
+      .replace(/^@/, "")
+      .toLowerCase();
+    if (
+      accountMode === "create" &&
+      !/^[a-z0-9._]{3,30}$/.test(normalizedUsername)
+    )
+      return showFormError(
+        "Choose a 3–30 character username using letters, numbers, dots or underscores.",
+      );
     const normalizedBirthDate = validatedDateOfBirth(dateOfBirth);
     if (!normalizedBirthDate)
       return showFormError("Enter your date of birth as DD/MM/YYYY.");
@@ -848,12 +927,15 @@ function Onboarding({
       return showFormError("Your password must contain at least 8 characters.");
     await run(async () => {
       if (accountMode === "create") {
-        const outcome = await onEmailSignUp(
-          name.trim(),
-          email.trim(),
+        const outcome = await onEmailSignUp({
+          firstName: firstName.trim(),
+          lastName: lastName.trim(),
+          username: normalizedUsername,
+          email: email.trim(),
           password,
-          normalizedBirthDate as string,
-        );
+          dateOfBirth: normalizedBirthDate as string,
+          avatarUri,
+        });
         if (outcome === "check-email") {
           setNoticeTone("success");
           setNotice(
@@ -878,76 +960,114 @@ function Onboarding({
       return showFormError("You must be 18+ to use this app.");
     await run(() => onProvider(provider, normalizedBirthDate));
   };
+  const chooseProfilePhoto = async () => {
+    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!permission.granted) {
+      Alert.alert(
+        "Photo permission required",
+        "Allow photo access to choose a profile picture. You can also skip this step.",
+      );
+      return;
+    }
+    const picked = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ["images"],
+      allowsEditing: true,
+      aspect: [1, 1],
+      quality: 0.8,
+    });
+    if (!picked.canceled) setAvatarUri(picked.assets[0].uri);
+  };
+  const noticeContent = !!notice && (
+    <View style={[s.authNotice, noticeTone === "error" && s.authNoticeError]}>
+      <Text
+        style={[
+          s.authNoticeText,
+          noticeTone === "error" && s.authNoticeTextError,
+        ]}
+      >
+        {notice}
+      </Text>
+    </View>
+  );
+  const birthDateField = (
+    <View style={s.birthDateField}>
+      <Text style={s.birthDateLabel}>Date of birth</Text>
+      <TextInput
+        value={dateOfBirth}
+        onChangeText={(value) => setDateOfBirth(formatDateOfBirth(value))}
+        keyboardType="number-pad"
+        maxLength={10}
+        placeholder="DD/MM/YYYY"
+        placeholderTextColor="rgba(32,26,27,.45)"
+        style={s.birthDateInput}
+      />
+    </View>
+  );
   return (
-    <Modal visible={visible} transparent animationType="slide">
-      <View style={s.modalWrap}>
-        <View style={s.onboard}>
-          <View style={s.handle} />
-          <Text style={s.onboardTitle}>Welcome to Saturated</Text>
-          <Text style={s.onboardAge}>You must be 18+ to use this app.</Text>
-          <View style={s.birthDateField}>
-            <Text style={s.birthDateLabel}>Date of birth</Text>
-            <TextInput
-              value={dateOfBirth}
-              onChangeText={(value) => setDateOfBirth(formatDateOfBirth(value))}
-              keyboardType="number-pad"
-              maxLength={10}
-              placeholder="DD/MM/YYYY"
-              placeholderTextColor="rgba(32,26,27,.45)"
-              style={s.birthDateInput}
-            />
-          </View>
-          {accountMode === "social" ? (
-            <>
+    <Modal
+      visible={visible}
+      transparent={accountMode !== "create"}
+      animationType="slide"
+    >
+      {accountMode === "create" ? (
+        <SafeAreaView style={s.createAccountScreen}>
+          <KeyboardAvoidingView
+            style={{ flex: 1 }}
+            behavior={Platform.OS === "ios" ? "padding" : undefined}
+          >
+            <ScrollView
+              keyboardShouldPersistTaps="handled"
+              contentContainerStyle={s.createAccountContent}
+            >
+              <Text style={s.createAccountTitle}>Create your account</Text>
+              <Text style={s.onboardAge}>You must be 18+ to use this app.</Text>
               <Pressable
                 accessibilityRole="button"
-                accessibilityLabel="Continue with Google"
-                style={s.socialButton}
-                disabled={busy}
-                onPress={() => void finishProvider("google")}
+                accessibilityLabel="Choose an optional profile photo"
+                style={s.createAvatarButton}
+                onPress={() => void chooseProfilePhoto()}
               >
-                <Globe size={20} color="#4285f4" />
-                <Text style={s.socialButtonText}>Continue with Google</Text>
+                <UserAvatar
+                  name={
+                    `${firstName} ${lastName}`.trim() ||
+                    chosenUsername ||
+                    "Saturated User"
+                  }
+                  source={avatarUri ? { uri: avatarUri } : undefined}
+                  size={84}
+                />
+                <View style={s.createAvatarCamera}>
+                  <Camera size={15} color="#fff" />
+                </View>
               </Pressable>
-              <Pressable
-                accessibilityRole="button"
-                accessibilityLabel="Continue with Apple"
-                style={[s.socialButton, s.socialButtonDark]}
-                disabled={busy}
-                onPress={() => void finishProvider("apple")}
-              >
-                <Apple size={21} color="#fff" fill="#fff" />
-                <Text style={[s.socialButtonText, { color: "#fff" }]}>
-                  Continue with Apple
-                </Text>
-              </Pressable>
-              <Pressable
-                accessibilityRole="button"
-                accessibilityLabel="Continue with email"
-                style={s.socialButton}
-                onPress={() => {
-                  setNotice("");
-                  setAccountMode("email");
-                }}
-              >
-                <Mail size={20} color={C.teal} />
-                <Text style={s.socialButtonText}>Continue with email</Text>
-              </Pressable>
-            </>
-          ) : (
-            <>
-              {accountMode === "create" && (
+              <Text style={s.createAvatarHint}>Profile photo (optional)</Text>
+              <View style={s.createNameRow}>
                 <TextInput
                   autoFocus
-                  value={name}
-                  onChangeText={setName}
-                  placeholder="Your name"
+                  value={firstName}
+                  onChangeText={setFirstName}
+                  placeholder="First name"
                   placeholderTextColor="rgba(32,26,27,.45)"
-                  style={s.input}
+                  style={[s.input, s.createNameInput]}
                 />
-              )}
+                <TextInput
+                  value={lastName}
+                  onChangeText={setLastName}
+                  placeholder="Last name"
+                  placeholderTextColor="rgba(32,26,27,.45)"
+                  style={[s.input, s.createNameInput]}
+                />
+              </View>
               <TextInput
-                autoFocus={accountMode === "email"}
+                value={chosenUsername}
+                onChangeText={setChosenUsername}
+                autoCapitalize="none"
+                autoCorrect={false}
+                placeholder="Username"
+                placeholderTextColor="rgba(32,26,27,.45)"
+                style={s.input}
+              />
+              <TextInput
                 value={email}
                 onChangeText={setEmail}
                 autoCapitalize="none"
@@ -965,23 +1085,21 @@ function Onboarding({
                 placeholderTextColor="rgba(32,26,27,.45)"
                 style={s.input}
               />
+              {birthDateField}
               <Pressable
                 style={[s.primary, s.onboardControl]}
                 accessibilityRole="button"
-                accessibilityLabel={
-                  accountMode === "create" ? "Create account" : "Sign in"
-                }
+                accessibilityLabel="Create account"
                 disabled={busy}
                 onPress={() => void finishEmail()}
               >
                 {busy ? (
                   <ActivityIndicator color="#fff" />
                 ) : (
-                  <Text style={s.primaryText}>
-                    {accountMode === "create" ? "Create account" : "Sign in"}
-                  </Text>
+                  <Text style={s.primaryText}>Create account</Text>
                 )}
               </Pressable>
+              {noticeContent}
               <Pressable
                 accessibilityRole="button"
                 accessibilityLabel="Back to sign in options"
@@ -993,26 +1111,101 @@ function Onboarding({
               >
                 <Text style={s.textButtonText}>Back to sign in options</Text>
               </Pressable>
-            </>
-          )}
-          {!!notice && (
-            <View
-              style={[
-                s.authNotice,
-                noticeTone === "error" && s.authNoticeError,
-              ]}
-            >
-              <Text
-                style={[
-                  s.authNoticeText,
-                  noticeTone === "error" && s.authNoticeTextError,
-                ]}
-              >
-                {notice}
-              </Text>
-            </View>
-          )}
-          {accountMode !== "create" && (
+            </ScrollView>
+          </KeyboardAvoidingView>
+        </SafeAreaView>
+      ) : (
+        <View style={s.modalWrap}>
+          <View style={s.onboard}>
+            <View style={s.handle} />
+            <Text style={s.onboardTitle}>Welcome to Saturated</Text>
+            <Text style={s.onboardAge}>You must be 18+ to use this app.</Text>
+            {birthDateField}
+            {accountMode === "social" ? (
+              <>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Continue with Google"
+                  style={s.socialButton}
+                  disabled={busy}
+                  onPress={() => void finishProvider("google")}
+                >
+                  <Globe size={20} color="#4285f4" />
+                  <Text style={s.socialButtonText}>Continue with Google</Text>
+                </Pressable>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Continue with Apple"
+                  style={[s.socialButton, s.socialButtonDark]}
+                  disabled={busy}
+                  onPress={() => void finishProvider("apple")}
+                >
+                  <Apple size={21} color="#fff" fill="#fff" />
+                  <Text style={[s.socialButtonText, { color: "#fff" }]}>
+                    Continue with Apple
+                  </Text>
+                </Pressable>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Continue with email"
+                  style={s.socialButton}
+                  onPress={() => {
+                    setNotice("");
+                    setAccountMode("email");
+                  }}
+                >
+                  <Mail size={20} color={C.teal} />
+                  <Text style={s.socialButtonText}>Continue with email</Text>
+                </Pressable>
+              </>
+            ) : (
+              <>
+                <TextInput
+                  autoFocus
+                  value={email}
+                  onChangeText={setEmail}
+                  autoCapitalize="none"
+                  keyboardType="email-address"
+                  placeholder="Email address"
+                  placeholderTextColor="rgba(32,26,27,.45)"
+                  style={s.input}
+                />
+                <TextInput
+                  value={password}
+                  onChangeText={setPassword}
+                  autoCapitalize="none"
+                  secureTextEntry
+                  placeholder="Password (8+ characters)"
+                  placeholderTextColor="rgba(32,26,27,.45)"
+                  style={s.input}
+                />
+                <Pressable
+                  style={[s.primary, s.onboardControl]}
+                  accessibilityRole="button"
+                  accessibilityLabel={"Sign in"}
+                  disabled={busy}
+                  onPress={() => void finishEmail()}
+                >
+                  {busy ? (
+                    <ActivityIndicator color="#fff" />
+                  ) : (
+                    <Text style={s.primaryText}>Sign in</Text>
+                  )}
+                </Pressable>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Back to sign in options"
+                  onPress={() => {
+                    setNotice("");
+                    setAccountMode("social");
+                  }}
+                  style={s.textButton}
+                >
+                  <Text style={s.textButtonText}>Back to sign in options</Text>
+                </Pressable>
+              </>
+            )}
+            {noticeContent}
             <Pressable
               accessibilityRole="button"
               accessibilityLabel="Create an account"
@@ -1025,9 +1218,9 @@ function Onboarding({
               <UserPlus size={18} color={C.red} />
               <Text style={s.createAccountText}>Create an account</Text>
             </Pressable>
-          )}
+          </View>
         </View>
-      </View>
+      )}
     </Modal>
   );
 }
@@ -1550,7 +1743,12 @@ function SearchScreen({
               onPress={() => onOpenProfile(item)}
               style={s.profileSearchCard}
             >
-              <Image source={item.avatar} style={s.profileSearchAvatar} />
+              <UserAvatar
+                name={item.name}
+                source={item.avatar}
+                size={50}
+                style={s.profileSearchAvatar}
+              />
               <View style={s.searchResultCopy}>
                 <Text style={s.searchResultName}>{item.name}</Text>
                 <Text style={[s.body, { color: C.teal }]}>{item.handle}</Text>
@@ -1832,10 +2030,11 @@ function ReviewCard({
                 onOpenProfile(review.user);
               }}
             >
-              <Image
+              <UserAvatar
+                name={review.user}
                 source={review.avatar}
+                size={40}
                 style={s.avatar}
-                resizeMode="cover"
               />
             </Pressable>
             <View style={{ flex: 1 }}>
@@ -1975,10 +2174,11 @@ function ReviewDetailScreen({
                   accessibilityLabel={`Open ${review.user}'s profile picture`}
                   onPress={() => onOpenProfile(review.user)}
                 >
-                  <Image
+                  <UserAvatar
+                    name={review.user}
                     source={review.avatar}
+                    size={44}
                     style={s.reviewDetailAvatar}
-                    resizeMode="cover"
                   />
                 </Pressable>
                 <View style={{ flex: 1 }}>
@@ -2042,10 +2242,11 @@ function ReviewDetailScreen({
                 accessibilityLabel={`Open ${item.user}'s profile`}
                 onPress={() => onOpenProfile(item.user)}
               >
-                <Image
+                <UserAvatar
+                  name={item.user}
                   source={item.avatar}
+                  size={38}
                   style={s.commentAvatar}
-                  resizeMode="cover"
                 />
               </Pressable>
               <View style={s.commentCopy}>
@@ -2123,6 +2324,8 @@ function DrinkProfile({
   const popularTags = Object.entries(
     mine
       .flatMap((review) => review.tags)
+      .map((tag) => tag.trim())
+      .filter(Boolean)
       .reduce<Record<string, number>>(
         (counts, tag) => ({ ...counts, [tag]: (counts[tag] || 0) + 1 }),
         {},
@@ -2131,7 +2334,6 @@ function DrinkProfile({
     .sort((a, b) => b[1] - a[1])
     .slice(0, 6)
     .map(([tag]) => tag);
-  const commonUserTags = popularTags.length ? popularTags : drink.tags;
   return (
     <Background>
       <ScrollView
@@ -2220,10 +2422,36 @@ function DrinkProfile({
             </Text>
           </Pressable>
         </View>
-        <View style={s.commonTagsSection}>
-          <Text style={s.cardTitle}>Common user flavour tags</Text>
-          <Text style={s.commonTagsText}>{commonUserTags.join("  ·  ")}</Text>
-        </View>
+        {mine.length > 0 && popularTags.length > 0 ? (
+          <View style={s.commonTagsSection}>
+            <Text style={s.cardTitle}>Flavour notes by users</Text>
+            <View style={s.userFlavourTagsWrap}>
+              {popularTags.map((tag) => (
+                <Pill key={tag} color="#960000">
+                  {tag}
+                </Pill>
+              ))}
+            </View>
+          </View>
+        ) : (
+          <View style={[s.reviewPromptCard, glass]}>
+            <GlassLayers radius={18} intensity={34} />
+            <Text style={s.reviewPromptTitle}>Tried this drink?</Text>
+            <Text style={s.reviewPromptCopy}>
+              {mine.length
+                ? "Add flavour notes to your review to help other drinkers."
+                : "Be the first to review it and share the flavour notes you noticed."}
+            </Text>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={`Write a review for ${drink.name}`}
+              style={s.reviewPromptButton}
+              onPress={onReview}
+            >
+              <Text style={s.primaryText}>Write a review</Text>
+            </Pressable>
+          </View>
+        )}
         {mine.map((r) => (
           <ReviewCard
             key={r.id}
@@ -2248,18 +2476,12 @@ function ReviewScreen({
   drink: Drink;
   existingReview?: Review;
   onBack: () => void;
-  onSubmit: (
-    r: number,
-    t: string,
-    tags: string[],
-    imageUri?: string,
-  ) => Promise<void> | void;
+  onSubmit: (r: number, t: string, tags: string[]) => Promise<void> | void;
 }) {
   const isEditing = Boolean(existingReview);
   const [rating, setRating] = useState(existingReview?.rating || 0);
   const [text, setText] = useState(existingReview?.text || "");
   const [tags, setTags] = useState<string[]>(existingReview?.tags || []);
-  const [imageUri, setImageUri] = useState<string | undefined>();
   const [saving, setSaving] = useState(false);
   const [customNote, setCustomNote] = useState("");
   const [addingCustom, setAddingCustom] = useState(false);
@@ -2302,8 +2524,14 @@ function ReviewScreen({
                 resizeMode="contain"
               />
             </View>
-            <View>
-              <Text style={s.detailTitle}>{drink.name}</Text>
+            <View style={s.reviewDrinkCopy}>
+              <Text
+                style={s.reviewDrinkTitle}
+                numberOfLines={2}
+                ellipsizeMode="tail"
+              >
+                {drink.name}
+              </Text>
               <Pill color={drink.typeColor}>{drink.type}</Pill>
             </View>
           </View>
@@ -2324,40 +2552,6 @@ function ReviewScreen({
               placeholder="What did you think of the drink?..."
               style={s.reviewInput}
             />
-            {!!(imageUri || existingReview?.imageUrls?.[0]) && (
-              <Image
-                source={{ uri: imageUri || existingReview?.imageUrls?.[0] }}
-                style={s.reviewUploadPreview}
-                resizeMode="cover"
-              />
-            )}
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel="Choose a review photo"
-              style={s.reviewPhotoButton}
-              onPress={async () => {
-                const permission =
-                  await ImagePicker.requestMediaLibraryPermissionsAsync();
-                if (!permission.granted) {
-                  Alert.alert(
-                    "Photo permission required",
-                    "Allow photo access to attach an image to your review.",
-                  );
-                  return;
-                }
-                const picked = await ImagePicker.launchImageLibraryAsync({
-                  mediaTypes: ["images"],
-                  allowsEditing: true,
-                  quality: 0.85,
-                });
-                if (!picked.canceled) setImageUri(picked.assets[0].uri);
-              }}
-            >
-              <Camera size={17} color={C.teal} />
-              <Text style={s.secondaryText}>
-                {imageUri ? "Change photo" : "Add a photo"}
-              </Text>
-            </Pressable>
           </View>
           <View style={[s.notesCard, glass]}>
             <Text style={s.cardTitle}>Flavour notes</Text>
@@ -2449,7 +2643,7 @@ function ReviewScreen({
                 );
               try {
                 setSaving(true);
-                await onSubmit(rating, text.trim(), tags, imageUri);
+                await onSubmit(rating, text.trim(), tags);
               } catch (error) {
                 Alert.alert(
                   "Could not save review",
@@ -2636,7 +2830,7 @@ function Profile({
   const isOwn = !profile;
   const profileName = profile?.name || name || "Mark Kelly";
   const profileHandle = profile?.handle || username || "@markelly1";
-  const profileAvatar = profile?.avatar || ownAvatar || fallbackAvatar;
+  const profileAvatar = profile?.avatar || ownAvatar;
   const memberSince = profile?.memberSince || "Jun 2026";
   const my = reviews.filter((review) =>
     profile
@@ -2737,7 +2931,12 @@ function Profile({
       )}
       <View style={[s.profileCard, glass]}>
         <GlassLayers radius={23} intensity={40} />
-        <Image source={profileAvatar} style={s.profileAvatar} />
+        <UserAvatar
+          name={profileName}
+          source={profileAvatar}
+          size={55}
+          style={s.profileAvatar}
+        />
         <View style={s.profileDetails}>
           <Text style={s.cardTitle}>{profileName}</Text>
           <Text style={s.profileHandle}>{profileHandle}</Text>
@@ -2999,6 +3198,7 @@ function SettingsOption({
 
 function SettingsScreen({
   name,
+  avatar,
   username,
   email,
   ageVerified,
@@ -3014,6 +3214,7 @@ function SettingsScreen({
   initialSection = "menu",
 }: {
   name: string;
+  avatar?: ImageSourcePropType;
   username: string;
   email: string;
   ageVerified: boolean;
@@ -3066,7 +3267,7 @@ function SettingsScreen({
               <Pressable
                 accessibilityRole="button"
                 accessibilityLabel="Upload profile picture"
-                style={s.reviewPhotoButton}
+                style={s.settingsPhotoButton}
                 onPress={() =>
                   void onUploadAvatar().catch((error) =>
                     Alert.alert(
@@ -3231,8 +3432,10 @@ function SettingsScreen({
         contentContainerStyle={s.settingsContent}
       >
         <View style={[s.settingsAccountCard, glass]}>
-          <Image
-            source={require("./assets/people/mark.png")}
+          <UserAvatar
+            name={name || "Saturated User"}
+            source={avatar}
+            size={55}
             style={s.settingsAvatar}
           />
           <View style={s.settingsAccountCopy}>
@@ -3375,7 +3578,7 @@ type FeedActivity = {
   action?: string;
   quote?: boolean;
   time: string;
-  avatar: ImageSourcePropType;
+  avatar?: ImageSourcePropType;
   drinkId: string;
   profileId?: string;
   reviewId?: string;
@@ -3610,10 +3813,11 @@ function Feed({
                 activity.action ? s.activityTall : s.activityShort,
               ]}
             >
-              <Image
+              <UserAvatar
+                name={activity.name}
                 source={activity.avatar}
+                size={33}
                 style={s.activityAvatar}
-                resizeMode="cover"
               />
               <View style={s.activityCopy}>
                 <Text style={s.body}>
@@ -3762,11 +3966,41 @@ export default function App() {
       loadBadges(userId),
       loadDrinkRequests(userId),
     ]);
-    setCurrentProfile(profile);
-    setName(profile.display_name || "Saturated User");
-    setUsername(
-      profile.username ? `@${profile.username.replace(/^@/, "")}` : "@user",
-    );
+    let resolvedProfile = profile;
+    const pendingAvatarUri = await AsyncStorage.getItem(PENDING_AVATAR_URI_KEY);
+    if (pendingAvatarUri && !profile.avatar_url) {
+      try {
+        const avatarUrl = await uploadAvatar(userId, pendingAvatarUri);
+        resolvedProfile = { ...profile, avatar_url: avatarUrl };
+        await AsyncStorage.removeItem(PENDING_AVATAR_URI_KEY);
+      } catch {
+        // Keep the local URI so the optional onboarding photo can retry later.
+      }
+    }
+    const pendingUsername = await AsyncStorage.getItem(PENDING_USERNAME_KEY);
+    if (pendingUsername) {
+      if (!resolvedProfile.username) {
+        try {
+          resolvedProfile = await updateCurrentProfile(activeSession.user, {
+            displayName: resolvedProfile.display_name,
+            username: pendingUsername,
+          });
+          await AsyncStorage.removeItem(PENDING_USERNAME_KEY);
+        } catch {
+          // The database migration normally handles this before the client fallback.
+        }
+      } else if (
+        resolvedProfile.username.replace(/^@/, "").toLowerCase() ===
+        pendingUsername.replace(/^@/, "").toLowerCase()
+      ) {
+        await AsyncStorage.removeItem(PENDING_USERNAME_KEY);
+      }
+    }
+    const resolvedUsername =
+      resolvedProfile.username || usernameFromEmail(activeSession.user.email);
+    setCurrentProfile(resolvedProfile);
+    setName(resolvedProfile.display_name || "Saturated User");
+    setUsername(`@${resolvedUsername.replace(/^@/, "")}`);
     setEmail(activeSession.user.email || "");
     setSaved(drinklistIds);
     setLikedReviews(likedIds);
@@ -4072,7 +4306,7 @@ export default function App() {
       user: currentProfile.display_name || "Saturated User",
       avatar: currentProfile.avatar_url
         ? { uri: currentProfile.avatar_url }
-        : fallbackAvatar,
+        : undefined,
       text,
       date: "Now",
     };
@@ -4203,20 +4437,17 @@ export default function App() {
           setEditingReviewId(null);
           setScreen(reviewReturn);
         }}
-        onSubmit={async (rating, text, tags, imageUri) => {
+        onSubmit={async (rating, text, tags) => {
           if (!session) {
             requireAccount();
             return;
           }
-          const reviewId = await saveReview({
+          await saveReview({
             beverageId: selected.id,
             rating,
             body: text,
             tags,
           });
-          if (imageUri) {
-            await uploadReviewImage(session.user.id, reviewId, imageUri);
-          }
           const [reviewRows, catalogueRows, drinklistIds, badgeRows] =
             await Promise.all([
               loadReviews(),
@@ -4241,7 +4472,7 @@ export default function App() {
         ownAvatar={
           currentProfile?.avatar_url
             ? { uri: currentProfile.avatar_url }
-            : fallbackAvatar
+            : undefined
         }
         ownUserId={session?.user.id}
         drinks={appDrinks}
@@ -4302,6 +4533,11 @@ export default function App() {
       <SettingsScreen
         key={settingsInitialSection}
         name={name}
+        avatar={
+          currentProfile?.avatar_url
+            ? { uri: currentProfile.avatar_url }
+            : undefined
+        }
         username={username}
         email={email}
         ageVerified={Boolean(currentProfile?.birth_verified_at)}
@@ -4406,18 +4642,30 @@ export default function App() {
             throw error;
           }
         }}
-        onEmailSignUp={async (
-          displayName,
-          accountEmail,
-          password,
-          dateOfBirth,
-        ) => {
-          const result = await signUpWithEmail(
-            displayName,
-            accountEmail,
-            password,
-            dateOfBirth,
-          );
+        onEmailSignUp={async (details) => {
+          await AsyncStorage.setItem(PENDING_USERNAME_KEY, details.username);
+          if (details.avatarUri)
+            await AsyncStorage.setItem(
+              PENDING_AVATAR_URI_KEY,
+              details.avatarUri,
+            );
+          else await AsyncStorage.removeItem(PENDING_AVATAR_URI_KEY);
+          let result;
+          try {
+            result = await signUpWithEmail(details);
+          } catch (error) {
+            await AsyncStorage.removeItem(PENDING_AVATAR_URI_KEY);
+            await AsyncStorage.removeItem(PENDING_USERNAME_KEY);
+            throw error;
+          }
+          if (result.session && details.avatarUri) {
+            try {
+              await uploadAvatar(result.session.user.id, details.avatarUri);
+              await AsyncStorage.removeItem(PENDING_AVATAR_URI_KEY);
+            } catch {
+              // The selected photo remains queued and uploads after the next session refresh.
+            }
+          }
           return result.session ? "signed-in" : "check-email";
         }}
         onProvider={async (provider, dateOfBirth) => {

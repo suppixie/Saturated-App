@@ -19,7 +19,7 @@ export type Review = {
   drinkId: string;
   userId?: string;
   user: string;
-  avatar: ImageSourcePropType;
+  avatar?: ImageSourcePropType;
   rating: number;
   text: string;
   tags: string[];
@@ -33,7 +33,7 @@ export type ReviewComment = {
   id: string;
   userId?: string;
   user: string;
-  avatar: ImageSourcePropType;
+  avatar?: ImageSourcePropType;
   text: string;
   date: string;
 };
@@ -44,7 +44,7 @@ export type SearchProfile = {
   handle: string;
   memberSince: string;
   buddies: number;
-  avatar: ImageSourcePropType;
+  avatar?: ImageSourcePropType;
 };
 
 export type Screen =

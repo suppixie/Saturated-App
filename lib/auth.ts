@@ -21,21 +21,29 @@ function getRedirectUrl() {
   return "saturated://auth/callback";
 }
 
-export async function signUpWithEmail(
-  displayName: string,
-  email: string,
-  password: string,
-  dateOfBirth: string,
-) {
+export type EmailSignUpDetails = {
+  firstName: string;
+  lastName: string;
+  username: string;
+  email: string;
+  password: string;
+  dateOfBirth: string;
+};
+
+export async function signUpWithEmail(details: EmailSignUpDetails) {
   const client = requireSupabase();
+  const displayName = `${details.firstName.trim()} ${details.lastName.trim()}`;
   const { data, error } = await client.auth.signUp({
-    email: email.trim().toLowerCase(),
-    password,
+    email: details.email.trim().toLowerCase(),
+    password: details.password,
     options: {
       emailRedirectTo: getRedirectUrl(),
       data: {
-        full_name: displayName.trim(),
-        date_of_birth: dateOfBirth,
+        first_name: details.firstName.trim(),
+        last_name: details.lastName.trim(),
+        full_name: displayName,
+        username: details.username.trim().replace(/^@/, "").toLowerCase(),
+        date_of_birth: details.dateOfBirth,
       },
     },
   });
