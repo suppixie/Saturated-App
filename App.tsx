@@ -25,7 +25,6 @@ import {
   Filter,
   Globe,
   Heart,
-  Info,
   LogOut,
   Mail,
   MessageCircle,
@@ -1681,6 +1680,25 @@ function Drinklist({
   onGo: (s: Screen) => void;
 }) {
   const [sortByType, setSortByType] = useState(false);
+  const flavourFallbacks: Record<string, string[]> = {
+    "soft drink": ["Fizzy", "Refreshing", "Sweet"],
+    beer: ["Crisp", "Malty", "Bitter"],
+    cocktail: ["Balanced", "Fruity", "Refreshing"],
+    wine: ["Fruity", "Dry", "Smooth"],
+    coffee: ["Roasted", "Strong", "Creamy"],
+    whiskey: ["Oaky", "Warm", "Smooth"],
+  };
+  const tagsForDrinklist = (drink: Drink) =>
+    Array.from(
+      new Set([
+        ...drink.tags,
+        ...(flavourFallbacks[drink.type.toLowerCase()] || [
+          "Smooth",
+          "Refreshing",
+          "Balanced",
+        ]),
+      ]),
+    ).slice(0, 3);
   const visibleItems = sortByType
     ? [...items].sort((a, b) => a.type.localeCompare(b.type))
     : items;
@@ -1738,10 +1756,12 @@ function Drinklist({
                   <Text style={s.cardTitle}>{d.rating} ★</Text>
                 </View>
                 <View style={s.listTagsRow}>
-                  {d.tags.map((t) => (
-                    <Pill key={t} color="#960000">
-                      {t}
-                    </Pill>
+                  {tagsForDrinklist(d).map((tag) => (
+                    <View key={tag} style={s.listTag}>
+                      <Text numberOfLines={1} style={s.listTagText}>
+                        {tag}
+                      </Text>
+                    </View>
                   ))}
                 </View>
               </View>
@@ -2463,6 +2483,12 @@ const badgeNames = [
   "Coke Zero Gang",
   "Spritz or nothing",
 ];
+const currentFallbackBadgeNames = [
+  "First Sip",
+  "Five Sips",
+  "Ten Sips",
+  "Social Sipper",
+];
 const bottleCapPoints = Array.from({ length: 48 }, (_, index) => {
   const angle = (index * Math.PI * 2) / 48 - Math.PI / 2;
   const radius = index % 2 === 0 ? 43 : 36;
@@ -2514,6 +2540,34 @@ function BadgeCap({ earned = false }: { earned?: boolean }) {
       <Polygon points={bottleCapPoints} fill="url(#badgeCap)" />
       <Circle cx={44} cy={44} r={28} fill="rgba(255,255,255,.08)" />
     </Svg>
+  );
+}
+
+function ProfileBadge({ name, earned }: { name: string; earned: boolean }) {
+  const exactArtwork =
+    name === "First Sip"
+      ? require("./assets/badges/first-sip.png")
+      : name === "Pint Master"
+        ? require("./assets/badges/pint-master.png")
+        : null;
+  return (
+    <View style={[s.badgeItem, !earned && s.badgeLocked]}>
+      {earned && exactArtwork ? (
+        <Image
+          source={exactArtwork}
+          accessibilityLabel={name}
+          style={
+            name === "Pint Master" ? s.badgeCompositeTall : s.badgeComposite
+          }
+          resizeMode="contain"
+        />
+      ) : (
+        <>
+          <BadgeCap earned={earned} />
+          <Text style={[s.tiny, s.badgeLabel]}>{name}</Text>
+        </>
+      )}
+    </View>
   );
 }
 
@@ -2591,19 +2645,52 @@ function Profile({
         ? review.userId === ownUserId
         : review.user === profileName || review.user === "Mark Kelly",
   );
-  const visibleBadgeNames = badges?.length
+  const currentBadgeNames = badges?.length
     ? badges.map((badge) => badge.name)
-    : badgeNames;
+    : currentFallbackBadgeNames;
+  const legacyBadgeNames = badgeNames.filter(
+    (badgeName) => !currentBadgeNames.includes(badgeName),
+  );
   const earned =
     badges?.filter((badge) => badge.earned_at).length ??
-    Math.min(visibleBadgeNames.length, Math.max(2, my.length + 1));
-  const earnedIndices = new Set(
+    Math.min(currentBadgeNames.length, my.length);
+  const earnedCurrentBadges = new Set(
     badges?.length
-      ? badges
-          .map((badge, index) => (badge.earned_at ? index : -1))
-          .filter((index) => index >= 0)
-      : [0, 4, 1, 2, 3, 5, 6, 7, 8].slice(0, earned),
+      ? badges.filter((badge) => badge.earned_at).map((badge) => badge.name)
+      : currentBadgeNames.slice(0, earned),
   );
+  const reviewedDrinks = my
+    .map((review) => drinks.find((drink) => drink.id === review.drinkId))
+    .filter((drink): drink is Drink => Boolean(drink));
+  const reviewedTypes = new Set(
+    reviewedDrinks.map((drink) => drink.type.toLowerCase()),
+  );
+  const reviewedNames = reviewedDrinks.map((drink) => drink.name.toLowerCase());
+  const reviewedOrigins = new Set(
+    reviewedDrinks.map((drink) => drink.origin).filter(Boolean),
+  );
+  const legacyBadgeEarned = (badgeName: string) => {
+    if (badgeName === "Wine much") return reviewedTypes.has("wine");
+    if (badgeName === "Caffeine in my Blood")
+      return reviewedTypes.has("coffee");
+    if (badgeName === "Around the World") return reviewedOrigins.size >= 3;
+    if (badgeName === "Pint Master") {
+      return (
+        reviewedDrinks.filter((drink) => drink.type.toLowerCase() === "beer")
+          .length >= 3
+      );
+    }
+    if (badgeName === "Cocktailio") return reviewedTypes.has("cocktail");
+    if (badgeName === "Always on the rocks")
+      return reviewedTypes.has("whiskey");
+    if (badgeName === "Coke Zero Gang") {
+      return reviewedNames.some((drinkName) => drinkName.includes("coke"));
+    }
+    if (badgeName === "Spritz or nothing") {
+      return reviewedNames.some((drinkName) => drinkName.includes("spritz"));
+    }
+    return false;
+  };
   const avg = my.length ? my.reduce((a, b) => a + b.rating, 0) / my.length : 0;
   const buddyCount = isOwn
     ? (buddyTotal ??
@@ -2683,7 +2770,7 @@ function Profile({
           </Pressable>
         </View>
       </View>
-      <View style={[s.inline, { marginHorizontal: 32 }]}>
+      <View style={[s.inline, s.profileTabs]}>
         <Pressable
           accessibilityRole="button"
           accessibilityLabel="Show reviews"
@@ -2710,57 +2797,43 @@ function Profile({
       {badgeTab ? (
         <ScrollView
           style={s.screenScroll}
-          contentContainerStyle={{ paddingBottom: 125 }}
+          contentContainerStyle={s.profileScrollContent}
         >
           <View style={[s.progressCard, glass]}>
             <ProgressRing
-              value={earned / Math.max(visibleBadgeNames.length, 1)}
+              value={earned / Math.max(currentBadgeNames.length, 1)}
             />
             <View>
               <Text style={s.cardTitle}>
-                {earned} of {visibleBadgeNames.length} badges unlocked
+                {earned} of {currentBadgeNames.length} badges unlocked
               </Text>
               <Text style={s.reviewText}>Try more drinks to earn badges</Text>
             </View>
           </View>
           <View style={s.badges}>
-            {visibleBadgeNames.map((badgeName, index) => {
-              const earnedBadge = earnedIndices.has(index);
-              const exactArtwork =
-                index === 0
-                  ? require("./assets/badges/first-sip.png")
-                  : index === 4
-                    ? require("./assets/badges/pint-master.png")
-                    : null;
-              return (
-                <View
-                  key={badgeName}
-                  style={[s.badgeItem, !earnedBadge && s.badgeLocked]}
-                >
-                  {earnedBadge && exactArtwork ? (
-                    <Image
-                      source={exactArtwork}
-                      accessibilityLabel={badgeName}
-                      style={
-                        index === 4 ? s.badgeCompositeTall : s.badgeComposite
-                      }
-                      resizeMode="contain"
-                    />
-                  ) : (
-                    <>
-                      <BadgeCap earned={earnedBadge} />
-                      <Text style={[s.tiny, s.badgeLabel]}>{badgeName}</Text>
-                    </>
-                  )}
-                </View>
-              );
-            })}
+            {currentBadgeNames.map((badgeName) => (
+              <ProfileBadge
+                key={badgeName}
+                name={badgeName}
+                earned={earnedCurrentBadges.has(badgeName)}
+              />
+            ))}
+          </View>
+          <Text style={s.legacyBadgeHeading}>Original badges</Text>
+          <View style={s.badges}>
+            {legacyBadgeNames.map((badgeName) => (
+              <ProfileBadge
+                key={badgeName}
+                name={badgeName}
+                earned={legacyBadgeEarned(badgeName)}
+              />
+            ))}
           </View>
         </ScrollView>
       ) : (
         <ScrollView
           style={s.screenScroll}
-          contentContainerStyle={{ paddingBottom: 125 }}
+          contentContainerStyle={s.profileScrollContent}
         >
           <View style={[s.stats, s.statsThree]}>
             <View style={[s.stat, s.statThree]}>
@@ -2779,15 +2852,13 @@ function Profile({
               <Text style={s.cardTitle}>Buddies</Text>
             </View>
           </View>
-          <Text
-            style={[s.cardTitle, { marginHorizontal: 32, marginVertical: 12 }]}
-          >
+          <Text style={[s.cardTitle, s.receiptHeading]}>
             {isOwn ? "Your Receipt" : `${profileName.split(" ")[0]}'s Reviews`}
           </Text>
           <View style={s.receiptWrap}>
             <ReceiptZigzag />
             <View style={s.receipt}>
-              {isOwn && (
+              {isOwn && my.length > 0 && (
                 <Pressable
                   accessibilityRole="button"
                   accessibilityLabel="Share receipt to Instagram or social apps"
@@ -2800,10 +2871,36 @@ function Profile({
               )}
               <Text style={s.receiptLogo}>Saturated</Text>
               <View style={s.dash} />
-              <View style={[s.inline, { justifyContent: "space-between" }]}>
-                <Text style={s.tiny}>QTY ITEM</Text>
-                <Text style={s.tiny}>RATING</Text>
-              </View>
+              {my.length > 0 && (
+                <View style={[s.inline, { justifyContent: "space-between" }]}>
+                  <Text style={s.tiny}>QTY ITEM</Text>
+                  <Text style={s.tiny}>RATING</Text>
+                </View>
+              )}
+              {my.length === 0 && (
+                <View style={s.receiptEmpty}>
+                  <Text style={s.receiptEmptyTitle}>
+                    {isOwn
+                      ? "Your receipt is empty"
+                      : `${profileName.split(" ")[0]} has no reviews yet`}
+                  </Text>
+                  <Text style={s.receiptEmptyCopy}>
+                    {isOwn
+                      ? "Try a new drink and write a review to see it appear here."
+                      : "Their drink reviews will appear here once they start tasting."}
+                  </Text>
+                  {isOwn && (
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel="Explore drinks"
+                      onPress={() => onGo("explore")}
+                      style={s.receiptEmptyButton}
+                    >
+                      <Text style={s.primaryText}>Explore drinks</Text>
+                    </Pressable>
+                  )}
+                </View>
+              )}
               {my.map((r, i) => {
                 const d = drinks.find((x) => x.id === r.drinkId)!;
                 return (
@@ -2935,7 +3032,7 @@ function SettingsScreen({
   onLogout: () => void;
   initialSection?: "menu" | "account";
 }) {
-  const [section, setSection] = useState<"menu" | "account" | "gdpr" | "about">(
+  const [section, setSection] = useState<"menu" | "account" | "gdpr">(
     initialSection,
   );
   const [draftName, setDraftName] = useState(name);
@@ -2944,12 +3041,7 @@ function SettingsScreen({
   const [logoutVisible, setLogoutVisible] = useState(false);
 
   if (section !== "menu") {
-    const title =
-      section === "account"
-        ? "Account Details"
-        : section === "gdpr"
-          ? "Privacy & Data"
-          : "About Saturated";
+    const title = section === "account" ? "Account Details" : "Privacy & Data";
     return (
       <Background>
         <Heading
@@ -3124,33 +3216,6 @@ function SettingsScreen({
               </Pressable>
             </View>
           )}
-
-          {section === "about" && (
-            <View style={[s.settingsDetailCard, glass]}>
-              <Text style={s.settingsAboutLogo}>Saturated</Text>
-              <Text style={s.settingsDetailCopy}>
-                Discover beverages, track what you have tried, share thoughtful
-                reviews and see what your buddies are drinking.
-              </Text>
-              <View style={s.settingsDataSummary}>
-                <Text style={s.body}>Version 1.0.0</Text>
-                <Text style={s.body}>iOS and Android</Text>
-              </View>
-              <Pressable
-                accessibilityRole="button"
-                accessibilityLabel="Open Saturated project website"
-                onPress={() =>
-                  Linking.openURL(
-                    "https://github.com/suppixie/Saturated-Original",
-                  )
-                }
-                style={s.settingsSecondaryButton}
-              >
-                <Globe size={16} color={C.teal} />
-                <Text style={s.settingsSecondaryText}>Project website</Text>
-              </Pressable>
-            </View>
-          )}
         </ScrollView>
       </Background>
     );
@@ -3190,12 +3255,6 @@ function SettingsScreen({
             subtitle="Privacy, data access, consent and deletion"
             onPress={() => setSection("gdpr")}
           />
-          <SettingsOption
-            icon={<Info size={20} color={C.teal} />}
-            title="About the app"
-            subtitle="Learn about Saturated and this version"
-            onPress={() => setSection("about")}
-          />
         </View>
 
         <Text style={s.settingsSectionTitle}>Community</Text>
@@ -3213,10 +3272,11 @@ function SettingsScreen({
           <SettingsOption
             icon={<Camera size={20} color={C.teal} />}
             title="Instagram & socials"
-            subtitle="Follow Saturated on social media"
+            subtitle="@saturated.app"
             onPress={() =>
-              Linking.openURL("https://www.instagram.com/").catch(() =>
-                Alert.alert("Instagram", "Instagram could not be opened."),
+              Linking.openURL("https://www.instagram.com/saturated.app/").catch(
+                () =>
+                  Alert.alert("Instagram", "Instagram could not be opened."),
               )
             }
           />
