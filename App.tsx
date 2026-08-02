@@ -190,6 +190,7 @@ function normalizedDrinkName(name: string) {
 }
 
 const localDrinkArtworkAliases: Record<string, string> = {
+  sprite: "sprite",
   "coca-cola-original-taste": "coke",
   "heineken-original": "heineken",
   "original-7up": "sevenup",
@@ -198,14 +199,14 @@ const localDrinkArtworkAliases: Record<string, string> = {
 };
 
 function localDrinkImageForName(name: string, databaseId?: string) {
-  if (databaseId && catalogueImages[databaseId]) {
-    return catalogueImages[databaseId];
-  }
   const aliasedDrinkId = databaseId
     ? localDrinkArtworkAliases[databaseId]
     : undefined;
   if (aliasedDrinkId) {
     return drinks.find((drink) => drink.id === aliasedDrinkId)?.image;
+  }
+  if (databaseId && catalogueImages[databaseId]) {
+    return catalogueImages[databaseId];
   }
   const normalized = normalizedDrinkName(name);
   return drinks.find((drink) => normalizedDrinkName(drink.name) === normalized)
@@ -1402,18 +1403,13 @@ function Splash() {
 function Explore({
   items,
   onOpen,
-  onToggle,
   onGo,
 }: {
   items: Drink[];
   onOpen: (d: Drink) => void;
-  onToggle: (id: string) => void;
   onGo: (s: Screen) => void;
 }) {
   const [filter, setFilter] = useState("All");
-  const [alcoholFilter, setAlcoholFilter] = useState<
-    "all" | "alcoholic" | "non-alcoholic"
-  >("all");
   const [visibleCount, setVisibleCount] = useState(EXPLORE_PAGE_SIZE);
   const filterOptions = [
     "All",
@@ -1432,35 +1428,12 @@ function Explore({
     if (filterOptions.includes(drink.type)) return drink.type;
     return "Other";
   };
-  const alcoholicCategories = [
-    "beer",
-    "cocktail",
-    "wine",
-    "whiskey",
-    "whisky",
-    "spirit",
-    "vodka",
-    "gin",
-    "rum",
-    "tequila",
-    "brandy",
-    "liqueur",
-  ];
-  const isAlcoholic = (drink: Drink) => {
-    const category = drink.type.toLowerCase();
-    return alcoholicCategories.some((value) => category.includes(value));
-  };
-  const shown = items.filter((drink) => {
-    const matchesCategory = filter === "All" || drinkCategory(drink) === filter;
-    const alcoholic = isAlcoholic(drink);
-    const matchesAlcohol =
-      alcoholFilter === "all" ||
-      (alcoholFilter === "alcoholic" ? alcoholic : !alcoholic);
-    return matchesCategory && matchesAlcohol;
-  });
+  const shown = items.filter(
+    (drink) => filter === "All" || drinkCategory(drink) === filter,
+  );
   useEffect(() => {
     setVisibleCount(EXPLORE_PAGE_SIZE);
-  }, [filter, alcoholFilter, items]);
+  }, [filter, items]);
   const visibleDrinks = shown.slice(0, visibleCount);
   return (
     <Background>
@@ -1484,38 +1457,6 @@ function Explore({
             <Users color={C.red} size={23} />
           </Pressable>
         </View>
-      </View>
-      <View style={s.alcoholToggle} accessibilityRole="tablist">
-        {(
-          [
-            ["all", "All"],
-            ["alcoholic", "Alcoholic"],
-            ["non-alcoholic", "Non-Alc"],
-          ] as const
-        ).map(([value, label]) => {
-          const selected = alcoholFilter === value;
-          return (
-            <Pressable
-              key={value}
-              accessibilityRole="tab"
-              accessibilityState={{ selected }}
-              onPress={() => setAlcoholFilter(value)}
-              style={[
-                s.alcoholToggleItem,
-                selected && s.alcoholToggleItemActive,
-              ]}
-            >
-              <Text
-                style={[
-                  s.alcoholToggleText,
-                  selected && s.alcoholToggleTextActive,
-                ]}
-              >
-                {label}
-              </Text>
-            </Pressable>
-          );
-        })}
       </View>
       <ScrollView
         horizontal
@@ -1546,7 +1487,6 @@ function Explore({
             accessibilityRole="button"
             accessibilityLabel={`Open ${item.name}`}
             onPress={() => onOpen(item)}
-            onLongPress={() => onToggle(item.id)}
             style={s.drinkCard}
           >
             <DrinkCardVisual drink={item} />
@@ -1995,7 +1935,7 @@ function Drinklist({
         ))}
         {!items.length && (
           <Text style={s.empty}>
-            Your Drinklist is empty. Long-press a drink on Explore to save it.
+            Your Drinklist is empty. Add drinks from Search or a drink profile.
           </Text>
         )}
       </ScrollView>
@@ -2434,22 +2374,13 @@ function DrinkProfile({
             </View>
           </View>
         ) : (
-          <View style={[s.reviewPromptCard, glass]}>
-            <GlassLayers radius={18} intensity={34} />
+          <View style={s.reviewPromptTextWrap}>
             <Text style={s.reviewPromptTitle}>Tried this drink?</Text>
             <Text style={s.reviewPromptCopy}>
               {mine.length
                 ? "Add flavour notes to your review to help other drinkers."
                 : "Be the first to review it and share the flavour notes you noticed."}
             </Text>
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel={`Write a review for ${drink.name}`}
-              style={s.reviewPromptButton}
-              onPress={onReview}
-            >
-              <Text style={s.primaryText}>Write a review</Text>
-            </Pressable>
           </View>
         )}
         {mine.map((r) => (
@@ -2842,9 +2773,6 @@ function Profile({
   const currentBadgeNames = badges?.length
     ? badges.map((badge) => badge.name)
     : currentFallbackBadgeNames;
-  const legacyBadgeNames = badgeNames.filter(
-    (badgeName) => !currentBadgeNames.includes(badgeName),
-  );
   const earned =
     badges?.filter((badge) => badge.earned_at).length ??
     Math.min(currentBadgeNames.length, my.length);
@@ -2885,6 +2813,12 @@ function Profile({
     }
     return false;
   };
+  const allBadgeNames = Array.from(
+    new Set([...currentBadgeNames, ...badgeNames]),
+  );
+  const badgeIsEarned = (badgeName: string) =>
+    earnedCurrentBadges.has(badgeName) || legacyBadgeEarned(badgeName);
+  const earnedBadgeCount = allBadgeNames.filter(badgeIsEarned).length;
   const avg = my.length ? my.reduce((a, b) => a + b.rating, 0) / my.length : 0;
   const buddyCount = isOwn
     ? (buddyTotal ??
@@ -2912,251 +2846,242 @@ function Profile({
   };
   return (
     <Background>
-      {isOwn ? (
-        <View style={s.headerRow}>
-          <Text style={s.headingText}>Profile</Text>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="Profile settings"
-            onPress={onSettings}
-            style={s.headerIcon}
-          >
-            <Settings color={C.red} />
-          </Pressable>
-        </View>
-      ) : (
-        <Heading back onBack={onBack}>
-          Profile
-        </Heading>
-      )}
-      <View style={[s.profileCard, glass]}>
-        <GlassLayers radius={23} intensity={40} />
-        <UserAvatar
-          name={profileName}
-          source={profileAvatar}
-          size={55}
-          style={s.profileAvatar}
-        />
-        <View style={s.profileDetails}>
-          <Text style={s.cardTitle}>{profileName}</Text>
-          <Text style={s.profileHandle}>{profileHandle}</Text>
-          <Text style={s.tiny}>Member since: {memberSince}</Text>
-        </View>
-        <View style={s.profileEditWrap}>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel={
-              isOwn
-                ? "Edit profile"
-                : `${followed ? "Unfollow" : "Follow"} ${profileName}`
-            }
-            onPress={isOwn ? onEdit : onToggleFollow}
-            style={[s.profileAction, followed && s.profileActionFollowing]}
-          >
-            {isOwn ? (
-              <Edit3 size={10} color={C.green} />
-            ) : (
-              <UserPlus size={11} color={followed ? C.cream : C.green} />
-            )}
-            <Text
-              style={[
-                s.profileActionText,
-                followed && s.profileActionTextFollowing,
-              ]}
+      <ScrollView
+        style={s.screenScroll}
+        contentContainerStyle={s.profilePageContent}
+      >
+        {isOwn ? (
+          <View style={s.headerRow}>
+            <Text style={s.headingText}>Profile</Text>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Profile settings"
+              onPress={onSettings}
+              style={s.headerIcon}
             >
-              {isOwn ? "Edit" : followed ? "Following" : "Follow"}
+              <Settings color={C.red} />
+            </Pressable>
+          </View>
+        ) : (
+          <Heading back onBack={onBack}>
+            Profile
+          </Heading>
+        )}
+        <View style={[s.profileCard, glass]}>
+          <GlassLayers radius={23} intensity={40} />
+          <UserAvatar
+            name={profileName}
+            source={profileAvatar}
+            size={55}
+            style={s.profileAvatar}
+          />
+          <View style={s.profileDetails}>
+            <Text style={s.cardTitle}>{profileName}</Text>
+            <Text style={s.profileHandle}>{profileHandle}</Text>
+            <Text style={s.tiny}>Member since: {memberSince}</Text>
+          </View>
+          <View style={s.profileEditWrap}>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={
+                isOwn
+                  ? "Edit profile"
+                  : `${followed ? "Unfollow" : "Follow"} ${profileName}`
+              }
+              onPress={isOwn ? onEdit : onToggleFollow}
+              style={[s.profileAction, followed && s.profileActionFollowing]}
+            >
+              {isOwn ? (
+                <Edit3 size={10} color={C.green} />
+              ) : (
+                <UserPlus size={11} color={followed ? C.cream : C.green} />
+              )}
+              <Text
+                style={[
+                  s.profileActionText,
+                  followed && s.profileActionTextFollowing,
+                ]}
+              >
+                {isOwn ? "Edit" : followed ? "Following" : "Follow"}
+              </Text>
+            </Pressable>
+          </View>
+        </View>
+        <View style={[s.inline, s.profileTabs]}>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Show reviews"
+            onPress={() => setBadgeTab(false)}
+            style={[s.tab, !badgeTab && s.tabActive]}
+          >
+            {badgeTab && <GlassLayers radius={23} intensity={35} />}
+            <Text style={[s.primaryText, badgeTab && { color: "#666" }]}>
+              Reviews
+            </Text>
+          </Pressable>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Show badges"
+            onPress={() => setBadgeTab(true)}
+            style={[s.tab, badgeTab && s.tabActive]}
+          >
+            {!badgeTab && <GlassLayers radius={23} intensity={35} />}
+            <Text style={[s.primaryText, !badgeTab && { color: "#666" }]}>
+              Badges
             </Text>
           </Pressable>
         </View>
-      </View>
-      <View style={[s.inline, s.profileTabs]}>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="Show reviews"
-          onPress={() => setBadgeTab(false)}
-          style={[s.tab, !badgeTab && s.tabActive]}
-        >
-          {badgeTab && <GlassLayers radius={23} intensity={35} />}
-          <Text style={[s.primaryText, badgeTab && { color: "#666" }]}>
-            Reviews
-          </Text>
-        </Pressable>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="Show badges"
-          onPress={() => setBadgeTab(true)}
-          style={[s.tab, badgeTab && s.tabActive]}
-        >
-          {!badgeTab && <GlassLayers radius={23} intensity={35} />}
-          <Text style={[s.primaryText, !badgeTab && { color: "#666" }]}>
-            Badges
-          </Text>
-        </Pressable>
-      </View>
-      {badgeTab ? (
-        <ScrollView
-          style={s.screenScroll}
-          contentContainerStyle={s.profileScrollContent}
-        >
-          <View style={[s.progressCard, glass]}>
-            <ProgressRing
-              value={earned / Math.max(currentBadgeNames.length, 1)}
-            />
-            <View>
-              <Text style={s.cardTitle}>
-                {earned} of {currentBadgeNames.length} badges unlocked
-              </Text>
-              <Text style={s.reviewText}>Try more drinks to earn badges</Text>
-            </View>
-          </View>
-          <View style={s.badges}>
-            {currentBadgeNames.map((badgeName) => (
-              <ProfileBadge
-                key={badgeName}
-                name={badgeName}
-                earned={earnedCurrentBadges.has(badgeName)}
+        {badgeTab ? (
+          <>
+            <View style={[s.progressCard, glass]}>
+              <ProgressRing
+                value={earnedBadgeCount / Math.max(allBadgeNames.length, 1)}
               />
-            ))}
-          </View>
-          <Text style={s.legacyBadgeHeading}>Original badges</Text>
-          <View style={s.badges}>
-            {legacyBadgeNames.map((badgeName) => (
-              <ProfileBadge
-                key={badgeName}
-                name={badgeName}
-                earned={legacyBadgeEarned(badgeName)}
-              />
-            ))}
-          </View>
-        </ScrollView>
-      ) : (
-        <ScrollView
-          style={s.screenScroll}
-          contentContainerStyle={s.profileScrollContent}
-        >
-          <View style={[s.stats, s.statsThree]}>
-            <View style={[s.stat, s.statThree]}>
-              <GlassLayers radius={23} intensity={40} />
-              <Text style={s.statNumber}>{my.length} 🍷</Text>
-              <Text style={s.cardTitle}>Drinks Tried</Text>
+              <View>
+                <Text style={s.cardTitle}>
+                  {earnedBadgeCount} of {allBadgeNames.length} badges unlocked
+                </Text>
+                <Text style={s.reviewText}>Try more drinks to earn badges</Text>
+              </View>
             </View>
-            <View style={[s.stat, s.statThree]}>
-              <GlassLayers radius={23} intensity={40} />
-              <Text style={s.statNumber}>{avg.toFixed(1)} ★</Text>
-              <Text style={s.cardTitle}>Avg. Rating</Text>
+            <View style={s.badges}>
+              {allBadgeNames.map((badgeName) => (
+                <ProfileBadge
+                  key={badgeName}
+                  name={badgeName}
+                  earned={badgeIsEarned(badgeName)}
+                />
+              ))}
             </View>
-            <View style={[s.stat, s.statThree]}>
-              <GlassLayers radius={23} intensity={40} />
-              <Text style={s.statNumber}>{buddyCount}</Text>
-              <Text style={s.cardTitle}>Buddies</Text>
+          </>
+        ) : (
+          <>
+            <View style={[s.stats, s.statsThree]}>
+              <View style={[s.stat, s.statThree]}>
+                <GlassLayers radius={23} intensity={40} />
+                <Text style={s.statNumber}>{my.length} 🍷</Text>
+                <Text style={s.cardTitle}>Drinks Tried</Text>
+              </View>
+              <View style={[s.stat, s.statThree]}>
+                <GlassLayers radius={23} intensity={40} />
+                <Text style={s.statNumber}>{avg.toFixed(1)} ★</Text>
+                <Text style={s.cardTitle}>Avg. Rating</Text>
+              </View>
+              <View style={[s.stat, s.statThree]}>
+                <GlassLayers radius={23} intensity={40} />
+                <Text style={s.statNumber}>{buddyCount}</Text>
+                <Text style={s.cardTitle}>Buddies</Text>
+              </View>
             </View>
-          </View>
-          <Text style={[s.cardTitle, s.receiptHeading]}>
-            {isOwn ? "Your Receipt" : `${profileName.split(" ")[0]}'s Reviews`}
-          </Text>
-          <View style={s.receiptWrap}>
-            <ReceiptZigzag />
-            <View style={s.receipt}>
-              {isOwn && my.length > 0 && (
-                <Pressable
-                  accessibilityRole="button"
-                  accessibilityLabel="Share receipt to Instagram or social apps"
-                  onPress={shareReceipt}
-                  style={s.receiptShareButton}
-                >
-                  <Share2 size={14} color={C.red} />
-                  <Text style={s.receiptShareText}>Share</Text>
-                </Pressable>
-              )}
-              <Text style={s.receiptLogo}>Saturated</Text>
-              <View style={s.dash} />
-              {my.length > 0 && (
-                <View style={[s.inline, { justifyContent: "space-between" }]}>
-                  <Text style={s.tiny}>QTY ITEM</Text>
-                  <Text style={s.tiny}>RATING</Text>
-                </View>
-              )}
-              {my.length === 0 && (
-                <View style={s.receiptEmpty}>
-                  <Text style={s.receiptEmptyTitle}>
-                    {isOwn
-                      ? "Your receipt is empty"
-                      : `${profileName.split(" ")[0]} has no reviews yet`}
-                  </Text>
-                  <Text style={s.receiptEmptyCopy}>
-                    {isOwn
-                      ? "Try a new drink and write a review to see it appear here."
-                      : "Their drink reviews will appear here once they start tasting."}
-                  </Text>
-                  {isOwn && (
-                    <Pressable
-                      accessibilityRole="button"
-                      accessibilityLabel="Explore drinks"
-                      onPress={() => onGo("explore")}
-                      style={s.receiptEmptyButton}
-                    >
-                      <Text style={s.primaryText}>Explore drinks</Text>
-                    </Pressable>
-                  )}
-                </View>
-              )}
-              {my.map((r, i) => {
-                const d = drinks.find((x) => x.id === r.drinkId)!;
-                return (
-                  <View
-                    key={r.id}
-                    style={[
-                      s.receiptItem,
-                      i < my.length - 1 && s.receiptItemDivider,
-                    ]}
+            <Text style={[s.cardTitle, s.receiptHeading]}>
+              {isOwn
+                ? "Your Receipt"
+                : `${profileName.split(" ")[0]}'s Reviews`}
+            </Text>
+            <View style={s.receiptWrap}>
+              <ReceiptZigzag />
+              <View style={s.receipt}>
+                {isOwn && my.length > 0 && (
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel="Share receipt to Instagram or social apps"
+                    onPress={shareReceipt}
+                    style={s.receiptShareButton}
                   >
-                    <View
-                      style={[s.inline, { justifyContent: "space-between" }]}
-                    >
+                    <Share2 size={14} color={C.red} />
+                    <Text style={s.receiptShareText}>Share</Text>
+                  </Pressable>
+                )}
+                <Text style={s.receiptLogo}>Saturated</Text>
+                <View style={s.dash} />
+                {my.length > 0 && (
+                  <View style={[s.inline, { justifyContent: "space-between" }]}>
+                    <Text style={s.tiny}>QTY ITEM</Text>
+                    <Text style={s.tiny}>RATING</Text>
+                  </View>
+                )}
+                {my.length === 0 && (
+                  <View style={s.receiptEmpty}>
+                    <Text style={s.receiptEmptyTitle}>
+                      {isOwn
+                        ? "Your receipt is empty"
+                        : `${profileName.split(" ")[0]} has no reviews yet`}
+                    </Text>
+                    <Text style={s.receiptEmptyCopy}>
+                      {isOwn
+                        ? "Try a new drink and write a review to see it appear here."
+                        : "Their drink reviews will appear here once they start tasting."}
+                    </Text>
+                    {isOwn && (
                       <Pressable
                         accessibilityRole="button"
-                        accessibilityLabel={`Open review for ${d?.name}`}
-                        onPress={() => onOpenReview(r)}
-                        style={s.receiptItemCopy}
+                        accessibilityLabel="Explore drinks"
+                        onPress={() => onGo("explore")}
+                        style={s.receiptEmptyButton}
                       >
-                        <Text style={s.body}>
-                          {i + 1} {d?.name}
-                        </Text>
-                        <Text style={s.tiny}> {r.date}</Text>
+                        <Text style={s.primaryText}>Explore drinks</Text>
                       </Pressable>
-                      {isOwn && (
+                    )}
+                  </View>
+                )}
+                {my.map((r, i) => {
+                  const d = drinks.find((x) => x.id === r.drinkId)!;
+                  return (
+                    <View
+                      key={r.id}
+                      style={[
+                        s.receiptItem,
+                        i < my.length - 1 && s.receiptItemDivider,
+                      ]}
+                    >
+                      <View
+                        style={[s.inline, { justifyContent: "space-between" }]}
+                      >
                         <Pressable
                           accessibilityRole="button"
-                          accessibilityLabel={`Edit review for ${d?.name}`}
-                          onPress={() => onEditReview(r)}
-                          style={s.receiptEditButton}
+                          accessibilityLabel={`Open review for ${d?.name}`}
+                          onPress={() => onOpenReview(r)}
+                          style={s.receiptItemCopy}
                         >
-                          <Edit3 size={12} color={C.red} />
+                          <Text style={s.body}>
+                            {i + 1} {d?.name}
+                          </Text>
+                          <Text style={s.tiny}> {r.date}</Text>
                         </Pressable>
-                      )}
-                      <View style={s.receiptRating}>
-                        <Text style={s.receiptStars}>
-                          {"★".repeat(Math.round(r.rating))}
-                        </Text>
-                        <Text style={s.receiptRatingNumber}>
-                          {r.rating.toFixed(1)}
-                        </Text>
+                        {isOwn && (
+                          <Pressable
+                            accessibilityRole="button"
+                            accessibilityLabel={`Edit review for ${d?.name}`}
+                            onPress={() => onEditReview(r)}
+                            style={s.receiptEditButton}
+                          >
+                            <Edit3 size={12} color={C.red} />
+                          </Pressable>
+                        )}
+                        <View style={s.receiptRating}>
+                          <Text style={s.receiptStars}>
+                            {"★".repeat(Math.round(r.rating))}
+                          </Text>
+                          <Text style={s.receiptRatingNumber}>
+                            {r.rating.toFixed(1)}
+                          </Text>
+                        </View>
                       </View>
+                      <Pressable
+                        accessibilityRole="button"
+                        accessibilityLabel={`Read ${d?.name} review`}
+                        onPress={() => onOpenReview(r)}
+                      >
+                        <Text style={s.receiptReviewText}>“{r.text}”</Text>
+                      </Pressable>
                     </View>
-                    <Pressable
-                      accessibilityRole="button"
-                      accessibilityLabel={`Read ${d?.name} review`}
-                      onPress={() => onOpenReview(r)}
-                    >
-                      <Text style={s.receiptReviewText}>“{r.text}”</Text>
-                    </Pressable>
-                  </View>
-                );
-              })}
+                  );
+                })}
+              </View>
             </View>
-          </View>
-        </ScrollView>
-      )}
+          </>
+        )}
+      </ScrollView>
       <BottomNav active="profile" onGo={onGo} />
     </Background>
   );
@@ -3536,41 +3461,6 @@ function SettingsScreen({
   );
 }
 
-const feedFriendCards = [
-  {
-    drinkId: "heineken",
-    source: require("./assets/feed/friend-heineken.png"),
-    count: "8",
-  },
-  {
-    drinkId: "rose",
-    source: require("./assets/feed/friend-rose.png"),
-    count: "2",
-  },
-  {
-    drinkId: "espresso",
-    source: require("./assets/feed/friend-espresso.png"),
-    count: "10+",
-  },
-  {
-    drinkId: "pilsner",
-    source: require("./assets/feed/friend-pilsner.png"),
-    count: "6",
-  },
-  {
-    drinkId: "petrus",
-    source: require("./assets/feed/friend-petrus.png"),
-    count: "5",
-  },
-];
-
-const feedBuddyAvatars = [
-  require("./assets/people/mark.png"),
-  require("./assets/people/liddy.png"),
-  require("./assets/people/sarah.png"),
-  require("./assets/people/james.png"),
-];
-
 type FeedActivity = {
   group?: string;
   name: string;
@@ -3582,141 +3472,79 @@ type FeedActivity = {
   drinkId: string;
   profileId?: string;
   reviewId?: string;
-  target: "drink" | "profile";
+  target: "drink" | "profile" | "review";
 };
-
-const feedActivity: FeedActivity[] = [
-  {
-    group: "Today",
-    name: "James kent",
-    message: "rated Pilsner Urquell 4.5/5 🍺",
-    action: "Read the review →",
-    time: "8h ago",
-    avatar: require("./assets/people/james.png"),
-    drinkId: "pilsner",
-    profileId: "james",
-    reviewId: "r7",
-    target: "drink",
-  },
-  {
-    group: "Yesterday",
-    name: "Liddy Powell",
-    message: "unlocked First Sip! 🥤",
-    time: "1 day ago",
-    avatar: require("./assets/people/liddy.png"),
-    drinkId: "sprite",
-    profileId: "liddy",
-    target: "profile",
-  },
-  {
-    name: "Jaques Dane",
-    message: "reviewed Heineken 🍺",
-    action: "Read the review →",
-    time: "1 day ago",
-    avatar: require("./assets/people/jaques.png"),
-    drinkId: "heineken",
-    profileId: "jaques",
-    reviewId: "r6",
-    target: "drink",
-  },
-  {
-    group: "Earlier this week",
-    name: "Liddy Powell",
-    message: "followed you",
-    time: "2 days ago",
-    avatar: require("./assets/people/liddy.png"),
-    drinkId: "sprite",
-    profileId: "liddy",
-    target: "profile",
-  },
-  {
-    name: "Aperol Spritz",
-    message: "is trending this week! 🔥",
-    action: "127 Reviews →",
-    time: "2 days ago",
-    avatar: require("./assets/drinks/aperol.png"),
-    drinkId: "aperol",
-    target: "drink",
-  },
-  {
-    name: "Sarah James",
-    message: "added White Choc Matcha Latte to her Drinklist +",
-    time: "2 days ago",
-    avatar: require("./assets/people/sarah.png"),
-    drinkId: "matcha",
-    profileId: "sarah",
-    target: "drink",
-  },
-  {
-    name: "Sarah James",
-    message: "commented on your review",
-    action: "“It’s definitely some quality beer”",
-    quote: true,
-    time: "4 days ago",
-    avatar: require("./assets/people/sarah.png"),
-    drinkId: "birra",
-    profileId: "sarah",
-    target: "profile",
-  },
-];
 
 function Feed({
   drinks,
   profiles,
   reviews,
   followingIds,
+  currentUserId,
   onBack,
   onOpen,
   onOpenProfile,
   onOpenReview,
+  onFollowProfile,
 }: {
   drinks: Drink[];
   profiles: SearchProfile[];
   reviews: Review[];
   followingIds: string[];
+  currentUserId?: string;
   onBack: () => void;
   onOpen: (drink: Drink) => void;
   onOpenProfile: (profile: SearchProfile) => void;
   onOpenReview: (review: Review) => void;
+  onFollowProfile: (profile: SearchProfile) => void;
 }) {
   const [showAll, setShowAll] = useState(false);
   const followedReviews = reviews.filter(
     (review) => review.userId && followingIds.includes(review.userId),
   );
-  const followedDrinkCounts = new Map<string, number>();
-  followedReviews.forEach((review) =>
-    followedDrinkCounts.set(
-      review.drinkId,
-      (followedDrinkCounts.get(review.drinkId) || 0) + 1,
-    ),
-  );
-  const liveFriendCards = Array.from(followedDrinkCounts.entries()).map(
-    ([drinkId, count]) => ({
+  const followedDrinkReviews = new Map<string, Review[]>();
+  followedReviews.forEach((review) => {
+    const current = followedDrinkReviews.get(review.drinkId) || [];
+    followedDrinkReviews.set(review.drinkId, [...current, review]);
+  });
+  const friendCards = Array.from(followedDrinkReviews.entries()).map(
+    ([drinkId, drinkReviews]) => ({
       drinkId,
-      source: drinks.find((drink) => drink.id === drinkId)?.image,
-      count: count > 9 ? "10+" : String(count),
+      count: drinkReviews.length > 9 ? "10+" : String(drinkReviews.length),
+      reviewers: drinkReviews.filter(
+        (review, index, all) =>
+          all.findIndex(
+            (candidate) =>
+              (candidate.userId || candidate.user) ===
+              (review.userId || review.user),
+          ) === index,
+      ),
     }),
   );
-  const allFriendCards = liveFriendCards.length
-    ? liveFriendCards
-    : feedFriendCards;
-  const visibleFriends = showAll ? allFriendCards : allFriendCards.slice(0, 5);
+  const visibleFriends = showAll ? friendCards : friendCards.slice(0, 5);
   const drinkById = (id: string) =>
     drinks.find((drink) => drink.id === id) || drinks[0];
-  const liveActivity = followedReviews.map((review, index) => ({
-    name: review.user,
-    message: `reviewed ${drinkById(review.drinkId).name}`,
-    action: "Read the review â†’",
-    time: index === 0 ? "Just now" : review.date,
-    avatar: review.avatar,
-    drinkId: review.drinkId,
-    profileId: review.userId,
-    reviewId: review.id,
-    target: "review",
-    group: index === 0 ? "Recent activity" : undefined,
-    quote: false,
-  }));
-  const activityItems = liveActivity.length ? liveActivity : feedActivity;
+  const activityItems: FeedActivity[] = followedReviews.map(
+    (review, index) => ({
+      name: review.user,
+      message: `reviewed ${drinkById(review.drinkId).name}`,
+      action: "Read the review →",
+      time: index === 0 ? "Just now" : review.date,
+      avatar: review.avatar,
+      drinkId: review.drinkId,
+      profileId: review.userId,
+      reviewId: review.id,
+      target: "review",
+      group: index === 0 ? "Recent activity" : undefined,
+      quote: false,
+    }),
+  );
+  const suggestedProfiles = profiles
+    .filter(
+      (profile) =>
+        profile.id !== currentUserId && !followingIds.includes(profile.id),
+    )
+    .slice(0, 4);
 
   return (
     <Background creamOpacity={0.5}>
@@ -3726,33 +3554,35 @@ function Feed({
         </Heading>
         <View style={s.feedSectionHeader}>
           <Text style={s.cardTitle}>Your friends are drinking..</Text>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel={
-              showAll ? "Show fewer friend drinks" : "View more friend drinks"
-            }
-            onPress={() => setShowAll((value) => !value)}
-            style={s.feedMoreButton}
-          >
-            <Text style={[s.cardTitle, { color: C.red }]}>
-              {showAll ? "Show Less" : "View More"}
-            </Text>
-            <ArrowRight
-              size={15}
-              strokeWidth={2.5}
-              color={C.ink}
-              style={showAll ? s.feedMoreArrowExpanded : undefined}
-            />
-          </Pressable>
+          {friendCards.length > 5 && (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={
+                showAll ? "Show fewer friend drinks" : "View more friend drinks"
+              }
+              onPress={() => setShowAll((value) => !value)}
+              style={s.feedMoreButton}
+            >
+              <Text style={[s.cardTitle, { color: C.red }]}>
+                {showAll ? "Show Less" : "View More"}
+              </Text>
+              <ArrowRight
+                size={15}
+                strokeWidth={2.5}
+                color={C.ink}
+                style={showAll ? s.feedMoreArrowExpanded : undefined}
+              />
+            </Pressable>
+          )}
         </View>
         <ScrollView
           horizontal
           showsHorizontalScrollIndicator={false}
           contentContainerStyle={s.friendStrip}
         >
-          {visibleFriends.map((friend, index) => (
+          {visibleFriends.map((friend) => (
             <Pressable
-              key={`${friend.drinkId}-${index}`}
+              key={friend.drinkId}
               accessibilityRole="button"
               accessibilityLabel={`Open ${drinkById(friend.drinkId).name}`}
               onPress={() => onOpen(drinkById(friend.drinkId))}
@@ -3762,17 +3592,15 @@ function Feed({
               <View style={s.friendSocialRow}>
                 <Text style={s.friendCount}>{friend.count}</Text>
                 <View style={s.friendAvatarStack}>
-                  {[0, 1, 2].map((offset) => (
-                    <Image
-                      key={offset}
-                      source={
-                        feedBuddyAvatars[
-                          (index + offset) % feedBuddyAvatars.length
-                        ]
-                      }
+                  {friend.reviewers.slice(0, 3).map((review, index) => (
+                    <UserAvatar
+                      key={review.userId || `${review.user}-${index}`}
+                      name={review.user}
+                      source={review.avatar}
+                      size={12}
                       style={[
                         s.friendMiniAvatar,
-                        offset > 0 && s.friendMiniAvatarOverlap,
+                        index > 0 && s.friendMiniAvatarOverlap,
                       ]}
                     />
                   ))}
@@ -3781,6 +3609,14 @@ function Feed({
             </Pressable>
           ))}
         </ScrollView>
+        {!visibleFriends.length && (
+          <View style={s.feedEmptySection}>
+            <Text style={s.feedEmptyTitle}>No buddy drinks yet</Text>
+            <Text style={s.feedEmptyCopy}>
+              Follow people to see what they are drinking here.
+            </Text>
+          </View>
+        )}
         <Text style={s.activityTitle}>Friends Activity</Text>
         {activityItems.map((activity, index) => (
           <View key={`${activity.name}-${index}`}>
@@ -3839,6 +3675,61 @@ function Feed({
             </Pressable>
           </View>
         ))}
+        {!activityItems.length && (
+          <>
+            <View style={s.feedEmptyActivity}>
+              <Users size={25} color={C.teal} />
+              <Text style={s.feedEmptyTitle}>
+                Your feed is ready for buddies
+              </Text>
+              <Text style={s.feedEmptyCopy}>
+                Follow people to see their reviews and drink activity here.
+              </Text>
+            </View>
+            {!!suggestedProfiles.length && (
+              <>
+                <Text style={s.suggestedProfilesTitle}>Suggested profiles</Text>
+                <View style={s.suggestedProfilesList}>
+                  {suggestedProfiles.map((profile) => (
+                    <View
+                      key={profile.id}
+                      style={[s.suggestedProfileCard, glass]}
+                    >
+                      <GlassLayers radius={18} intensity={34} />
+                      <Pressable
+                        accessibilityRole="button"
+                        accessibilityLabel={`Open ${profile.name}'s profile`}
+                        onPress={() => onOpenProfile(profile)}
+                        style={s.suggestedProfileIdentity}
+                      >
+                        <UserAvatar
+                          name={profile.name}
+                          source={profile.avatar}
+                          size={42}
+                        />
+                        <View style={s.suggestedProfileCopy}>
+                          <Text numberOfLines={1} style={s.cardTitle}>
+                            {profile.name}
+                          </Text>
+                          <Text style={s.profileHandle}>{profile.handle}</Text>
+                        </View>
+                      </Pressable>
+                      <Pressable
+                        accessibilityRole="button"
+                        accessibilityLabel={`Follow ${profile.name}`}
+                        onPress={() => onFollowProfile(profile)}
+                        style={s.suggestedFollowButton}
+                      >
+                        <UserPlus size={13} color={C.cream} />
+                        <Text style={s.suggestedFollowText}>Follow</Text>
+                      </Pressable>
+                    </View>
+                  ))}
+                </View>
+              </>
+            )}
+          </>
+        )}
       </ScrollView>
     </Background>
   );
@@ -4242,6 +4133,22 @@ export default function App() {
     setScreen("splash");
     return false;
   };
+  const followProfile = async (profileId: string) => {
+    if (!requireAccount()) return;
+    try {
+      const followed = await toggleFollow(profileId);
+      setFollowedProfiles((current) =>
+        followed
+          ? Array.from(new Set([...current, profileId]))
+          : current.filter((id) => id !== profileId),
+      );
+    } catch (error) {
+      Alert.alert(
+        "Could not update buddy",
+        error instanceof Error ? error.message : "Please try again.",
+      );
+    }
+  };
   const toggle = async (id: string) => {
     if (!requireAccount()) return;
     try {
@@ -4344,14 +4251,7 @@ export default function App() {
     );
   else if (screen === "splash") body = <Splash />;
   else if (screen === "explore")
-    body = (
-      <Explore
-        items={appDrinks}
-        onOpen={open}
-        onToggle={(id) => void toggle(id)}
-        onGo={go}
-      />
-    );
+    body = <Explore items={appDrinks} onOpen={open} onGo={go} />;
   else if (screen === "search")
     body = (
       <SearchScreen
@@ -4506,20 +4406,7 @@ export default function App() {
         badgeTab={badgeTab}
         setBadgeTab={setBadgeTab}
         followed={followedProfiles.includes(selectedProfile.id)}
-        onToggleFollow={() => {
-          if (!requireAccount()) return;
-          void toggleFollow(selectedProfile.id)
-            .then((followed) =>
-              setFollowedProfiles((current) =>
-                followed
-                  ? Array.from(new Set([...current, selectedProfile.id]))
-                  : current.filter((id) => id !== selectedProfile.id),
-              ),
-            )
-            .catch((error) =>
-              Alert.alert("Could not update buddy", error.message),
-            );
-        }}
+        onToggleFollow={() => void followProfile(selectedProfile.id)}
         onBack={() => setScreen(profileReturn)}
         onGo={go}
         onEditReview={editReview}
@@ -4615,10 +4502,12 @@ export default function App() {
         profiles={appProfiles}
         reviews={reviews}
         followingIds={followedProfiles}
+        currentUserId={session?.user.id}
         onBack={() => go("explore")}
         onOpen={open}
         onOpenProfile={openProfile}
         onOpenReview={openReview}
+        onFollowProfile={(profile) => void followProfile(profile.id)}
       />
     );
   return (

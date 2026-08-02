@@ -75,15 +75,6 @@ export async function signInWithEmail(email: string, password: string) {
 
 export async function signInWithProvider(provider: "google" | "apple") {
   const providerName = provider === "google" ? "Google" : "Apple";
-  const providerEnabled =
-    provider === "google"
-      ? process.env.EXPO_PUBLIC_GOOGLE_AUTH_ENABLED === "true"
-      : process.env.EXPO_PUBLIC_APPLE_AUTH_ENABLED === "true";
-  if (!providerEnabled) {
-    throw new Error(
-      `${providerName} sign-in still needs to be enabled in Supabase. Use email sign-in for now.`,
-    );
-  }
   const client = requireSupabase();
   const redirectTo = getRedirectUrl();
   const { data, error } = await client.auth.signInWithOAuth({
