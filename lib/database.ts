@@ -26,6 +26,7 @@ export type DatabaseBeverage = {
   official_tags: string[];
   average_rating: number | string;
   review_count: number;
+  created_at?: string;
 };
 
 export type DatabaseReview = {

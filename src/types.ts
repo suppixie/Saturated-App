@@ -12,6 +12,7 @@ export type Drink = {
   description: string;
   origin?: string;
   brand?: string;
+  createdAt?: string;
 };
 
 export type Review = {
