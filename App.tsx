@@ -215,6 +215,10 @@ function localDrinkImageForName(name: string, databaseId?: string) {
     ?.image;
 }
 
+function beverageHasCatalogArtwork(beverage: DatabaseBeverage) {
+  return Boolean(localDrinkImageForName(beverage.name, beverage.id));
+}
+
 function typeColor(category: string) {
   const normalized = category.toLowerCase();
   if (normalized.includes("soft")) return "#2903c0";
@@ -1096,6 +1100,7 @@ function Onboarding({
             behavior={Platform.OS === "ios" ? "padding" : undefined}
           >
             <ScrollView
+              showsVerticalScrollIndicator={false}
               keyboardShouldPersistTaps="handled"
               contentContainerStyle={s.createAccountContent}
             >
@@ -1381,6 +1386,7 @@ function OAuthConsentScreen({
   return (
     <Background>
       <ScrollView
+        showsVerticalScrollIndicator={false}
         style={s.oauthConsentScroll}
         contentContainerStyle={s.oauthConsentContent}
       >
@@ -1683,6 +1689,7 @@ function Explore({
         ))}
       </ScrollView>
       <FlatList
+        showsVerticalScrollIndicator={false}
         data={visibleDrinks}
         style={s.screenList}
         numColumns={3}
@@ -1901,6 +1908,7 @@ function SearchScreen({
       )}
       {mode === "beverages" ? (
         <FlatList
+          showsVerticalScrollIndicator={false}
           data={beverageResults}
           style={s.screenList}
           keyExtractor={(item) => item.id}
@@ -1965,6 +1973,7 @@ function SearchScreen({
         />
       ) : (
         <FlatList
+          showsVerticalScrollIndicator={false}
           data={profileResults}
           style={s.screenList}
           keyExtractor={(item) => item.id}
@@ -2026,6 +2035,7 @@ function RequestDrinkScreen({
           Request Drink
         </Heading>
         <ScrollView
+          showsVerticalScrollIndicator={false}
           style={s.screenScroll}
           keyboardShouldPersistTaps="handled"
           contentContainerStyle={s.requestPageContent}
@@ -2161,6 +2171,7 @@ function Drinklist({
         {items.length} Drinks saved to try
       </Text>
       <ScrollView
+        showsVerticalScrollIndicator={false}
         style={s.screenScroll}
         contentContainerStyle={s.drinklistContent}
       >
@@ -2370,6 +2381,7 @@ function ReviewDetailScreen({
         Review Thread
       </Heading>
       <ScrollView
+        showsVerticalScrollIndicator={false}
         style={s.screenScroll}
         keyboardShouldPersistTaps="handled"
         contentContainerStyle={s.reviewDetailContent}
@@ -2571,6 +2583,7 @@ function DrinkProfile({
   return (
     <Background>
       <ScrollView
+        showsVerticalScrollIndicator={false}
         style={s.screenScroll}
         contentContainerStyle={{ paddingBottom: 35 }}
       >
@@ -2734,7 +2747,11 @@ function ReviewScreen({
         style={{ flex: 1 }}
         behavior={Platform.OS === "ios" ? "padding" : undefined}
       >
-        <ScrollView style={s.screenScroll} keyboardShouldPersistTaps="handled">
+        <ScrollView
+          showsVerticalScrollIndicator={false}
+          style={s.screenScroll}
+          keyboardShouldPersistTaps="handled"
+        >
           <Heading back onBack={onBack}>
             Review
           </Heading>
@@ -3148,6 +3165,7 @@ function Profile({
   return (
     <Background>
       <ScrollView
+        showsVerticalScrollIndicator={false}
         style={s.screenScroll}
         contentContainerStyle={s.profilePageContent}
       >
@@ -3484,6 +3502,7 @@ function SettingsScreen({
           {title}
         </Heading>
         <ScrollView
+          showsVerticalScrollIndicator={false}
           style={s.screenScroll}
           contentContainerStyle={s.settingsDetailContent}
         >
@@ -3658,6 +3677,7 @@ function SettingsScreen({
         Settings
       </Heading>
       <ScrollView
+        showsVerticalScrollIndicator={false}
         style={s.screenScroll}
         contentContainerStyle={s.settingsContent}
       >
@@ -3853,7 +3873,11 @@ function Feed({
 
   return (
     <Background creamOpacity={0.5}>
-      <ScrollView style={s.screenScroll} contentContainerStyle={s.feedContent}>
+      <ScrollView
+        showsVerticalScrollIndicator={false}
+        style={s.screenScroll}
+        contentContainerStyle={s.feedContent}
+      >
         <Heading back onBack={onBack}>
           Feed
         </Heading>
@@ -4105,6 +4129,7 @@ export default function App() {
       loadReviews(),
     ]);
     const mappedDrinks = catalogueRows
+      .filter(beverageHasCatalogArtwork)
       .map(beverageFromDatabase)
       .sort((a, b) => {
         const aFeatured = featuredCatalogueOrder.indexOf(a.id);
@@ -4117,7 +4142,10 @@ export default function App() {
         return a.name.localeCompare(b.name);
       });
     const mappedProfiles = profileRows.map(profileFromDatabase);
-    const mappedReviews = reviewRows.map(reviewFromDatabase);
+    const activeDrinkIds = new Set(mappedDrinks.map((drink) => drink.id));
+    const mappedReviews = reviewRows
+      .map(reviewFromDatabase)
+      .filter((review) => activeDrinkIds.has(review.drinkId));
     setCatalogueDrinks(mappedDrinks);
     setDatabaseProfiles(mappedProfiles);
     setReviews(mappedReviews);
@@ -4668,8 +4696,18 @@ export default function App() {
               loadDrinklist(session.user.id),
               loadBadges(session.user.id),
             ]);
-          setReviews(reviewRows.map(reviewFromDatabase));
-          setCatalogueDrinks(catalogueRows.map(beverageFromDatabase));
+          const activeCatalogueDrinks = catalogueRows
+            .filter(beverageHasCatalogArtwork)
+            .map(beverageFromDatabase);
+          const activeDrinkIds = new Set(
+            activeCatalogueDrinks.map((drink) => drink.id),
+          );
+          setReviews(
+            reviewRows
+              .map(reviewFromDatabase)
+              .filter((review) => activeDrinkIds.has(review.drinkId)),
+          );
+          setCatalogueDrinks(activeCatalogueDrinks);
           setSaved(drinklistIds);
           setBadges(badgeRows);
           setEditingReviewId(null);
