@@ -73,6 +73,24 @@ export async function signInWithEmail(email: string, password: string) {
   return data;
 }
 
+export async function sendPasswordResetEmail(email: string) {
+  const client = requireSupabase();
+  const { error } = await client.auth.resetPasswordForEmail(
+    email.trim().toLowerCase(),
+    { redirectTo: getRedirectUrl() },
+  );
+  if (error) throw error;
+}
+
+export async function updatePassword(password: string) {
+  if (password.length < 8) {
+    throw new Error("Your password must contain at least 8 characters.");
+  }
+  const client = requireSupabase();
+  const { error } = await client.auth.updateUser({ password });
+  if (error) throw error;
+}
+
 export async function signInWithProvider(provider: "google" | "apple") {
   const providerName = provider === "google" ? "Google" : "Apple";
   const client = requireSupabase();

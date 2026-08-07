@@ -58,6 +58,7 @@ export type Screen =
   | "profile"
   | "userProfile"
   | "settings"
+  | "moderation"
   | "review"
   | "reviewDetail"
   | "feed";

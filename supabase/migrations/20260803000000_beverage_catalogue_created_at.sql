@@ -12,9 +12,9 @@ select
   b.image_url,
   b.official_tags,
   b.is_published,
-  b.created_at,
   coalesce(round(avg(r.rating)::numeric, 1), 0::numeric) as average_rating,
-  count(r.id)::integer as review_count
+  count(r.id)::integer as review_count,
+  b.created_at
 from public.beverages b
 left join public.reviews r on r.beverage_id = b.id
 where b.is_published

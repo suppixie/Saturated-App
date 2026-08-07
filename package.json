@@ -35,7 +35,8 @@
     "web": "expo start --web",
     "web:oauth": "expo start --web --port 3000",
     "catalogue:migration": "node scripts/generate-beverage-migration.mjs",
-    "catalogue:images": "powershell -ExecutionPolicy Bypass -File scripts/extract-catalogue-images.ps1"
+    "catalogue:images": "powershell -ExecutionPolicy Bypass -File scripts/extract-catalogue-images.ps1",
+    "legal:validate": "node scripts/validate-legal-site.mjs"
   },
   "private": true
 }

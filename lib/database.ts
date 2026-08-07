@@ -10,6 +10,8 @@ export type DatabaseProfile = {
   avatar_url: string | null;
   date_of_birth?: string | null;
   birth_verified_at: string | null;
+  terms_accepted_at?: string | null;
+  is_suspended?: boolean;
   created_at: string;
   follower_count?: number;
 };
@@ -75,6 +77,42 @@ export type DatabaseBadge = {
   earned_at: string | null;
 };
 
+export type ReportTargetType = "profile" | "review" | "comment";
+
+export type ReportReason =
+  | "spam"
+  | "harassment"
+  | "hate_speech"
+  | "sexual_content"
+  | "dangerous_or_illegal"
+  | "misinformation"
+  | "intellectual_property"
+  | "other";
+
+export type ModerationAction =
+  | "dismiss"
+  | "hide_content"
+  | "restore_content"
+  | "suspend_user"
+  | "reinstate_user"
+  | "resolve_no_action";
+
+export type DatabaseModerationReport = {
+  id: string;
+  target_type: ReportTargetType;
+  reason: ReportReason;
+  details: string;
+  status: "open" | "in_review" | "resolved" | "dismissed";
+  created_at: string;
+  target_profile_id: string | null;
+  target_review_id: string | null;
+  target_comment_id: string | null;
+  reporter_name: string;
+  target_user_id: string | null;
+  target_user_name: string | null;
+  content_preview: string | null;
+};
+
 function client() {
   if (!supabase) {
     throw new Error(
@@ -102,7 +140,7 @@ export async function loadProfiles() {
     client()
       .from("profiles")
       .select(
-        "id,username,display_name,bio,avatar_url,date_of_birth,birth_verified_at,created_at",
+        "id,username,display_name,bio,avatar_url,date_of_birth,birth_verified_at,terms_accepted_at,is_suspended,created_at",
       )
       .order("display_name"),
     client().from("follows").select("following_id"),
@@ -124,7 +162,7 @@ export async function loadCurrentProfile(userId: string) {
   const response = await client()
     .from("profiles")
     .select(
-      "id,username,display_name,bio,avatar_url,date_of_birth,birth_verified_at,created_at",
+      "id,username,display_name,bio,avatar_url,date_of_birth,birth_verified_at,terms_accepted_at,is_suspended,created_at",
     )
     .eq("id", userId)
     .single();
@@ -152,7 +190,7 @@ export async function updateCurrentProfile(
     })
     .eq("id", user.id)
     .select(
-      "id,username,display_name,bio,avatar_url,date_of_birth,birth_verified_at,created_at",
+      "id,username,display_name,bio,avatar_url,date_of_birth,birth_verified_at,terms_accepted_at,is_suspended,created_at",
     )
     .single();
   const profile = result(
@@ -184,7 +222,7 @@ export async function updateCurrentDateOfBirth(
     })
     .eq("id", userId)
     .select(
-      "id,username,display_name,bio,avatar_url,date_of_birth,birth_verified_at,created_at",
+      "id,username,display_name,bio,avatar_url,date_of_birth,birth_verified_at,terms_accepted_at,is_suspended,created_at",
     )
     .single();
   return result(response.data, response.error) as DatabaseProfile;
@@ -286,6 +324,78 @@ export async function loadFollowingIds(userId: string) {
   );
 }
 
+export async function loadBlockedProfileIds(userId: string) {
+  const response = await client()
+    .from("user_blocks")
+    .select("blocked_id")
+    .eq("blocker_id", userId);
+  return (result(response.data, response.error) || []).map(
+    (row) => row.blocked_id as string,
+  );
+}
+
+export async function blockProfile(profileId: string) {
+  const response = await client().rpc("block_user", {
+    target_profile_id: profileId,
+  });
+  return Boolean(result(response.data, response.error));
+}
+
+export async function unblockProfile(profileId: string) {
+  const response = await client().rpc("unblock_user", {
+    target_profile_id: profileId,
+  });
+  return Boolean(result(response.data, response.error));
+}
+
+export async function acceptCommunityTerms() {
+  const response = await client().rpc("accept_community_terms");
+  return result(response.data, response.error) as string;
+}
+
+export async function submitContentReport(input: {
+  targetType: ReportTargetType;
+  targetId: string;
+  reason: ReportReason;
+  details?: string;
+}) {
+  const response = await client().rpc("submit_content_report", {
+    report_target_type: input.targetType,
+    report_target_id: input.targetId,
+    report_reason: input.reason,
+    report_details: input.details?.trim() || "",
+  });
+  return result(response.data, response.error) as string;
+}
+
+export async function loadModeratorStatus() {
+  const response = await client().rpc("is_moderator");
+  return Boolean(result(response.data, response.error));
+}
+
+export async function loadModerationQueue() {
+  const response = await client()
+    .from("moderation_queue")
+    .select("*")
+    .in("status", ["open", "in_review"])
+    .order("created_at", { ascending: true });
+  return (result(response.data, response.error) ||
+    []) as DatabaseModerationReport[];
+}
+
+export async function resolveModerationReport(
+  reportId: string,
+  action: ModerationAction,
+  note = "",
+) {
+  const response = await client().rpc("resolve_content_report", {
+    target_report_id: reportId,
+    moderation_action: action,
+    moderator_note: note.trim(),
+  });
+  result(response.data, response.error);
+}
+
 export async function toggleFollow(profileId: string) {
   const response = await client().rpc("toggle_follow", {
     target_profile_id: profileId,
@@ -344,6 +454,52 @@ export async function deleteCurrentAccount() {
   const response = await client().rpc("delete_my_account");
   result(response.data, response.error);
   await client().auth.signOut({ scope: "local" });
+}
+
+export async function exportCurrentUserData(userId: string) {
+  const requests = [
+    client().from("profiles").select("*").eq("id", userId).single(),
+    client().from("reviews").select("*").eq("user_id", userId),
+    client().from("review_comments").select("*").eq("user_id", userId),
+    client().from("review_likes").select("*").eq("user_id", userId),
+    client().from("drinklist").select("*").eq("user_id", userId),
+    client().from("follows").select("*").eq("follower_id", userId),
+    client().from("drink_requests").select("*").eq("user_id", userId),
+    client().from("user_badges").select("*").eq("user_id", userId),
+    client().from("user_blocks").select("*").eq("blocker_id", userId),
+    client().from("content_reports").select("*").eq("reporter_id", userId),
+  ] as const;
+  const [
+    profile,
+    reviews,
+    comments,
+    likes,
+    drinklist,
+    follows,
+    drinkRequests,
+    badges,
+    blocks,
+    reports,
+  ] = await Promise.all(requests);
+
+  const checked = <T>(response: {
+    data: T;
+    error: { message: string } | null;
+  }) => result(response.data, response.error);
+
+  return {
+    exported_at: new Date().toISOString(),
+    profile: checked(profile),
+    reviews: checked(reviews),
+    comments: checked(comments),
+    likes: checked(likes),
+    drinklist: checked(drinklist),
+    follows: checked(follows),
+    drink_requests: checked(drinkRequests),
+    badges: checked(badges),
+    blocks: checked(blocks),
+    reports: checked(reports),
+  };
 }
 
 async function uploadPublicImage(

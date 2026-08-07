@@ -22,7 +22,9 @@ import {
   ChevronRight,
   CirclePlus,
   Edit3,
+  Ban,
   Filter,
+  Flag,
   Globe,
   Heart,
   LogOut,
@@ -32,6 +34,7 @@ import {
   Scale,
   Search,
   Settings,
+  ShieldCheck,
   Share2,
   Star,
   UserPlus,
@@ -82,36 +85,55 @@ import {
   signInWithEmail,
   signInWithProvider,
   signUpWithEmail,
+  sendPasswordResetEmail,
+  updatePassword,
 } from "./lib/auth";
 import {
+  acceptCommunityTerms,
   addReviewComment,
+  blockProfile,
   DatabaseBadge,
   DatabaseBeverage,
   DatabaseComment,
+  DatabaseModerationReport,
   DatabaseProfile,
   DatabaseReview,
   deleteCurrentAccount,
+  exportCurrentUserData,
   loadBadges,
+  loadBlockedProfileIds,
   loadCatalogue,
   loadCurrentProfile,
   loadDrinklist,
   loadDrinkRequests,
   loadFollowingIds,
   loadLikedReviewIds,
+  loadModerationQueue,
+  loadModeratorStatus,
   loadProfiles,
   loadReviewComments,
   loadReviews,
   saveReview,
+  submitContentReport,
   submitDrinkRequest,
   toggleDrinklist,
   toggleFollow,
   toggleReviewLike,
+  unblockProfile,
+  resolveModerationReport,
   updateCurrentDateOfBirth,
   updateCurrentProfile,
   uploadAvatar,
 } from "./lib/database";
 import { isSupabaseConfigured, supabase } from "./lib/supabase";
 import { catalogueImages } from "./src/data/catalogueImages";
+import {
+  ModerationQueueContent,
+  PasswordResetModal,
+  ReportModal,
+  ReportTarget,
+  TermsAcceptanceModal,
+} from "./src/components/ReleaseSafety";
 import {
   drinks,
   featuredCatalogueOrder,
@@ -143,6 +165,7 @@ const STORAGE_KEY = "saturated-state-v7";
 const PENDING_BIRTH_DATE_KEY = "saturated-pending-date-of-birth";
 const PENDING_AVATAR_URI_KEY = "saturated-pending-avatar-uri";
 const PENDING_USERNAME_KEY = "saturated-pending-username";
+const PENDING_TERMS_ACCEPTANCE_KEY = "saturated-pending-terms-acceptance";
 const DISCOVERY_LOCATION_KEY = "saturated-discovery-location";
 
 function createNoisePath(
@@ -925,6 +948,7 @@ function Onboarding({
   onEmailSignIn,
   onEmailSignUp,
   onProvider,
+  onForgotPassword,
 }: {
   visible: boolean;
   onEmailSignIn: (
@@ -939,6 +963,7 @@ function Onboarding({
     provider: "google" | "apple",
     dateOfBirth: string,
   ) => Promise<void>;
+  onForgotPassword: (email: string) => Promise<void>;
 }) {
   const [firstName, setFirstName] = useState("");
   const [lastName, setLastName] = useState("");
@@ -950,6 +975,7 @@ function Onboarding({
   const [notice, setNotice] = useState("");
   const [noticeTone, setNoticeTone] = useState<"success" | "error">("success");
   const [busy, setBusy] = useState(false);
+  const [termsAccepted, setTermsAccepted] = useState(false);
   const [accountMode, setAccountMode] = useState<"social" | "email" | "create">(
     "social",
   );
@@ -982,6 +1008,10 @@ function Onboarding({
     setNotice(message);
   };
   const finishEmail = async () => {
+    if (!termsAccepted)
+      return showFormError(
+        "Accept the Terms and Community Guidelines to continue.",
+      );
     if (!email.trim() || !email.includes("@"))
       return showFormError("Enter a valid email address.");
     if (accountMode === "create" && (!firstName.trim() || !lastName.trim()))
@@ -1032,6 +1062,10 @@ function Onboarding({
     });
   };
   const finishProvider = async (provider: "google" | "apple") => {
+    if (!termsAccepted)
+      return showFormError(
+        "Accept the Terms and Community Guidelines to continue.",
+      );
     const normalizedBirthDate = validatedDateOfBirth(dateOfBirth);
     if (!normalizedBirthDate)
       return showFormError("Enter your date of birth as DD/MM/YYYY.");
@@ -1085,6 +1119,55 @@ function Onboarding({
           accountMode === "create" && s.createAccountInput,
         ]}
       />
+    </View>
+  );
+  const termsField = (
+    <View style={s.termsField}>
+      <Pressable
+        accessibilityRole="checkbox"
+        accessibilityState={{ checked: termsAccepted }}
+        accessibilityLabel="Accept Terms and Community Guidelines"
+        onPress={() => setTermsAccepted((accepted) => !accepted)}
+        style={s.termsAcceptRow}
+      >
+        <View style={[s.termsCheckbox, termsAccepted && s.termsCheckboxActive]}>
+          {termsAccepted && <Text style={s.termsCheckmark}>✓</Text>}
+        </View>
+        <Text style={s.termsAcceptText}>
+          I agree to Saturated's Terms and Community Guidelines.
+        </Text>
+      </Pressable>
+      <View style={s.termsLinksRow}>
+        <Pressable
+          onPress={() =>
+            void Linking.openURL(
+              "https://suppixie.github.io/Saturated-App/terms/",
+            )
+          }
+        >
+          <Text style={s.termsLink}>Terms</Text>
+        </Pressable>
+        <Text style={s.termsLinkDivider}>•</Text>
+        <Pressable
+          onPress={() =>
+            void Linking.openURL(
+              "https://suppixie.github.io/Saturated-App/community-guidelines/",
+            )
+          }
+        >
+          <Text style={s.termsLink}>Community Guidelines</Text>
+        </Pressable>
+        <Text style={s.termsLinkDivider}>•</Text>
+        <Pressable
+          onPress={() =>
+            void Linking.openURL(
+              "https://suppixie.github.io/Saturated-App/privacy/",
+            )
+          }
+        >
+          <Text style={s.termsLink}>Privacy</Text>
+        </Pressable>
+      </View>
     </View>
   );
   return (
@@ -1171,6 +1254,7 @@ function Onboarding({
                 style={[s.input, s.createAccountInput]}
               />
               {birthDateField}
+              {termsField}
               <Pressable
                 style={[s.primary, s.onboardControl]}
                 accessibilityRole="button"
@@ -1206,6 +1290,7 @@ function Onboarding({
             <Text style={s.onboardTitle}>Welcome to Saturated</Text>
             <Text style={s.onboardAge}>You must be 18+ to use this app.</Text>
             {birthDateField}
+            {termsField}
             {accountMode === "social" ? (
               <>
                 <Pressable
@@ -1276,6 +1361,27 @@ function Onboarding({
                   ) : (
                     <Text style={s.primaryText}>Sign in</Text>
                   )}
+                </Pressable>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Reset forgotten password"
+                  disabled={busy}
+                  onPress={() => {
+                    if (!email.trim() || !email.includes("@")) {
+                      showFormError("Enter your email address first.");
+                      return;
+                    }
+                    void run(async () => {
+                      await onForgotPassword(email.trim());
+                      setNoticeTone("success");
+                      setNotice(
+                        "Password reset sent. Open the email link, then return to Saturated.",
+                      );
+                    });
+                  }}
+                  style={s.textButton}
+                >
+                  <Text style={s.textButtonText}>Forgot password?</Text>
                 </Pressable>
                 <Pressable
                   accessibilityRole="button"
@@ -2253,12 +2359,14 @@ function ReviewCard({
   review,
   liked,
   onLike,
+  onReport,
   onOpen,
   onOpenProfile,
 }: {
   review: Review;
   liked: boolean;
   onLike: (id: string) => void;
+  onReport?: (review: Review) => void;
   onOpen: (review: Review) => void;
   onOpenProfile: (user: string) => void;
 }) {
@@ -2315,6 +2423,19 @@ function ReviewCard({
             ))}
           </View>
           <View style={s.inline}>
+            {!!onReport && (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={`Report ${review.user}'s review`}
+                onPress={(event) => {
+                  event.stopPropagation();
+                  onReport(review);
+                }}
+                style={s.reportIconButton}
+              >
+                <Flag size={13} color={C.red} />
+              </Pressable>
+            )}
             <MessageCircle size={13} color={C.ink} />
             <Text style={s.tiny}>{review.comments}</Text>
             <Pressable
@@ -2351,6 +2472,8 @@ function ReviewDetailScreen({
   onBack,
   onLike,
   onAddComment,
+  onReportReview,
+  onReportComment,
   onOpenProfile,
   onOpenDrink,
   activeTab,
@@ -2363,6 +2486,8 @@ function ReviewDetailScreen({
   onBack: () => void;
   onLike: () => void;
   onAddComment: (text: string) => void;
+  onReportReview: (review: Review) => void;
+  onReportComment: (comment: ReviewComment) => void;
   onOpenProfile: (user: string) => void;
   onOpenDrink: (drink: Drink) => void;
   activeTab: "explore" | "drinklist" | "profile";
@@ -2457,6 +2582,15 @@ function ReviewDetailScreen({
                 ))}
               </View>
               <View style={s.inline}>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Report this review"
+                  onPress={() => onReportReview(review)}
+                  style={s.reportTextButton}
+                >
+                  <Flag size={14} color={C.red} />
+                  <Text style={s.reportText}>Report</Text>
+                </Pressable>
                 <MessageCircle size={16} color={C.ink} />
                 <Text style={s.body}>{review.comments}</Text>
                 <Pressable
@@ -2507,6 +2641,15 @@ function ReviewDetailScreen({
                   <Text style={s.tiny}>{item.date}</Text>
                 </View>
                 <Text style={s.reviewText}>{item.text}</Text>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={`Report ${item.user}'s comment`}
+                  onPress={() => onReportComment(item)}
+                  style={s.commentReportButton}
+                >
+                  <Flag size={11} color={C.red} />
+                  <Text style={s.commentReportText}>Report</Text>
+                </Pressable>
               </View>
             </View>
           ))
@@ -2548,6 +2691,7 @@ function DrinkProfile({
   onReview,
   onToggle,
   onLike,
+  onReportReview,
   likedReviewIds,
   onOpenReview,
   onOpenProfile,
@@ -2559,6 +2703,7 @@ function DrinkProfile({
   onReview: () => void;
   onToggle: () => void;
   onLike: (id: string) => void;
+  onReportReview: (review: Review) => void;
   likedReviewIds: string[];
   onOpenReview: (review: Review) => void;
   onOpenProfile: (user: string) => void;
@@ -2696,6 +2841,7 @@ function DrinkProfile({
             review={r}
             liked={likedReviewIds.includes(r.id)}
             onLike={onLike}
+            onReport={onReportReview}
             onOpen={onOpenReview}
             onOpenProfile={onOpenProfile}
           />
@@ -3038,7 +3184,10 @@ function Profile({
   badgeTab,
   setBadgeTab,
   followed,
+  blocked,
   onToggleFollow,
+  onToggleBlock,
+  onReportProfile,
   onBack,
   onGo,
   onEditReview,
@@ -3058,7 +3207,10 @@ function Profile({
   badgeTab: boolean;
   setBadgeTab: (b: boolean) => void;
   followed?: boolean;
+  blocked?: boolean;
   onToggleFollow?: () => void;
+  onToggleBlock?: () => void;
+  onReportProfile?: () => void;
   onBack?: () => void;
   onGo: (s: Screen) => void;
   onEditReview: (review: Review) => void;
@@ -3226,6 +3378,33 @@ function Profile({
             </Pressable>
           </View>
         </View>
+        {!isOwn && (
+          <View style={s.profileSafetyActions}>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={`Report ${profileName}`}
+              onPress={onReportProfile}
+              style={s.profileSafetyButton}
+            >
+              <Flag size={13} color={C.red} />
+              <Text style={s.profileSafetyText}>Report user</Text>
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={`${blocked ? "Unblock" : "Block"} ${profileName}`}
+              onPress={onToggleBlock}
+              style={[
+                s.profileSafetyButton,
+                blocked && s.profileSafetyButtonActive,
+              ]}
+            >
+              <Ban size={13} color={blocked ? "#fff" : C.red} />
+              <Text style={[s.profileSafetyText, blocked && { color: "#fff" }]}>
+                {blocked ? "Unblock user" : "Block user"}
+              </Text>
+            </Pressable>
+          </View>
+        )}
         <View style={[s.inline, s.profileTabs]}>
           <Pressable
             accessibilityRole="button"
@@ -3457,8 +3636,11 @@ function SettingsScreen({
   onRequest,
   onSaveAccount,
   onUploadAvatar,
+  onExportData,
   onDeleteAccount,
   onLogout,
+  isModerator,
+  onModeration,
   initialSection = "menu",
 }: {
   name: string;
@@ -3477,8 +3659,11 @@ function SettingsScreen({
     email: string;
   }) => Promise<void> | void;
   onUploadAvatar: () => Promise<void>;
+  onExportData: () => Promise<unknown>;
   onDeleteAccount: () => void;
   onLogout: () => void;
+  isModerator: boolean;
+  onModeration: () => void;
   initialSection?: "menu" | "account";
 }) {
   const [section, setSection] = useState<"menu" | "account" | "gdpr">(
@@ -3558,10 +3743,15 @@ function SettingsScreen({
               <View style={s.settingsVerifiedRow}>
                 <Text style={s.settingsVerifiedText}>
                   {ageVerified
-                    ? "✓ 21+ age verified"
+                    ? "✓ 18+ age confirmed"
                     : "Age verification pending"}
                 </Text>
               </View>
+              <Text style={s.settingsAgeNote}>
+                Saturated does not sell alcohol. Local purchase and consumption
+                laws still apply, including 21+ purchase rules in the United
+                States.
+              </Text>
               <Pressable
                 accessibilityRole="button"
                 accessibilityLabel="Save account details"
@@ -3622,24 +3812,54 @@ function SettingsScreen({
                 accessibilityRole="button"
                 accessibilityLabel="Export my data"
                 onPress={() =>
-                  Share.share({
-                    title: "My Saturated data",
-                    message: JSON.stringify(
-                      {
-                        profile: { name, username, email },
-                        reviewCount,
-                        savedCount,
-                        requestCount,
-                      },
-                      null,
-                      2,
-                    ),
-                  })
+                  void onExportData()
+                    .then((data) =>
+                      Share.share({
+                        title: "My Saturated data",
+                        message: JSON.stringify(data, null, 2),
+                      }),
+                    )
+                    .catch((error) =>
+                      Alert.alert(
+                        "Could not export data",
+                        error instanceof Error
+                          ? error.message
+                          : "Please try again.",
+                      ),
+                    )
                 }
                 style={s.settingsSecondaryButton}
               >
                 <Share2 size={16} color={C.teal} />
                 <Text style={s.settingsSecondaryText}>Export my data</Text>
+              </Pressable>
+              <Pressable
+                accessibilityRole="link"
+                accessibilityLabel="Open privacy policy"
+                onPress={() =>
+                  void Linking.openURL(
+                    "https://suppixie.github.io/Saturated-App/privacy/",
+                  )
+                }
+                style={s.settingsLegalLink}
+              >
+                <Text style={s.settingsLegalLinkText}>
+                  Read the Privacy & GDPR Notice
+                </Text>
+              </Pressable>
+              <Pressable
+                accessibilityRole="link"
+                accessibilityLabel="Open account deletion help"
+                onPress={() =>
+                  void Linking.openURL(
+                    "https://suppixie.github.io/Saturated-App/delete-account/",
+                  )
+                }
+                style={s.settingsLegalLink}
+              >
+                <Text style={s.settingsLegalLinkText}>
+                  Account deletion help
+                </Text>
               </Pressable>
               <Pressable
                 accessibilityRole="button"
@@ -3690,7 +3910,7 @@ function SettingsScreen({
           />
           <View style={s.settingsAccountCopy}>
             <Text style={s.cardTitle}>{name || "Mark Kelly"}</Text>
-            <Text style={s.tiny}>21+ verified account</Text>
+            <Text style={s.tiny}>18+ account · local alcohol laws apply</Text>
           </View>
         </View>
 
@@ -3707,6 +3927,26 @@ function SettingsScreen({
             title="GDPR regulations"
             subtitle="Privacy, data access, consent and deletion"
             onPress={() => setSection("gdpr")}
+          />
+          <SettingsOption
+            icon={<ShieldCheck size={20} color={C.teal} />}
+            title="Terms & community rules"
+            subtitle="Safety, acceptable use and reporting"
+            onPress={() =>
+              void Linking.openURL(
+                "https://suppixie.github.io/Saturated-App/community-guidelines/",
+              )
+            }
+          />
+          <SettingsOption
+            icon={<Mail size={20} color={C.teal} />}
+            title="Support"
+            subtitle="Help, privacy and account deletion"
+            onPress={() =>
+              void Linking.openURL(
+                "https://suppixie.github.io/Saturated-App/support/",
+              )
+            }
           />
         </View>
 
@@ -3734,6 +3974,20 @@ function SettingsScreen({
             }
           />
         </View>
+
+        {isModerator && (
+          <>
+            <Text style={s.settingsSectionTitle}>Administration</Text>
+            <View style={s.settingsGroup}>
+              <SettingsOption
+                icon={<ShieldCheck size={20} color={C.red} />}
+                title="Moderation queue"
+                subtitle="Review reports and take safety action"
+                onPress={onModeration}
+              />
+            </View>
+          </>
+        )}
 
         <View style={[s.settingsGroup, { marginTop: 22 }]}>
           <SettingsOption
@@ -3799,6 +4053,43 @@ type FeedActivity = {
   reviewId?: string;
   target: "drink" | "profile" | "review";
 };
+
+function ModerationScreen({
+  reports,
+  busyId,
+  onBack,
+  onRefresh,
+  onResolve,
+}: {
+  reports: DatabaseModerationReport[];
+  busyId?: string;
+  onBack: () => void;
+  onRefresh: () => void;
+  onResolve: (
+    report: DatabaseModerationReport,
+    action:
+      | "dismiss"
+      | "hide_content"
+      | "restore_content"
+      | "suspend_user"
+      | "reinstate_user"
+      | "resolve_no_action",
+  ) => void;
+}) {
+  return (
+    <Background>
+      <Heading back onBack={onBack}>
+        Moderation
+      </Heading>
+      <ModerationQueueContent
+        reports={reports}
+        busyId={busyId}
+        onRefresh={onRefresh}
+        onResolve={onResolve}
+      />
+    </Background>
+  );
+}
 
 function Feed({
   drinks,
@@ -4109,6 +4400,15 @@ export default function App() {
   const [selectedProfile, setSelectedProfile] = useState(searchableProfiles[1]);
   const [profileReturn, setProfileReturn] = useState<Screen>("search");
   const [followedProfiles, setFollowedProfiles] = useState<string[]>([]);
+  const [blockedProfiles, setBlockedProfiles] = useState<string[]>([]);
+  const [reportTarget, setReportTarget] = useState<ReportTarget | null>(null);
+  const [isModerator, setIsModerator] = useState(false);
+  const [moderationReports, setModerationReports] = useState<
+    DatabaseModerationReport[]
+  >([]);
+  const [moderationBusyId, setModerationBusyId] = useState<string>();
+  const [passwordRecoveryVisible, setPasswordRecoveryVisible] = useState(false);
+  const [termsRequired, setTermsRequired] = useState(false);
   const [settingsInitialSection, setSettingsInitialSection] = useState<
     "menu" | "account"
   >("menu");
@@ -4169,8 +4469,12 @@ export default function App() {
       setSaved([]);
       setLikedReviews([]);
       setFollowedProfiles([]);
+      setBlockedProfiles([]);
       setBadges([]);
       setRequests([]);
+      setIsModerator(false);
+      setModerationReports([]);
+      setTermsRequired(false);
       return;
     }
 
@@ -4182,6 +4486,8 @@ export default function App() {
       followingIds,
       badgeRows,
       requestRows,
+      blockedIds,
+      moderatorStatus,
     ] = await Promise.all([
       loadCurrentProfile(userId),
       loadDrinklist(userId),
@@ -4189,8 +4495,18 @@ export default function App() {
       loadFollowingIds(userId),
       loadBadges(userId),
       loadDrinkRequests(userId),
+      loadBlockedProfileIds(userId),
+      loadModeratorStatus(),
     ]);
     let resolvedProfile = profile;
+    const pendingTermsAcceptance = await AsyncStorage.getItem(
+      PENDING_TERMS_ACCEPTANCE_KEY,
+    );
+    if (pendingTermsAcceptance && !resolvedProfile.terms_accepted_at) {
+      const acceptedAt = await acceptCommunityTerms();
+      resolvedProfile = { ...resolvedProfile, terms_accepted_at: acceptedAt };
+      await AsyncStorage.removeItem(PENDING_TERMS_ACCEPTANCE_KEY);
+    }
     const pendingAvatarUri = await AsyncStorage.getItem(PENDING_AVATAR_URI_KEY);
     if (pendingAvatarUri && !profile.avatar_url) {
       try {
@@ -4229,7 +4545,11 @@ export default function App() {
     setSaved(drinklistIds);
     setLikedReviews(likedIds);
     setFollowedProfiles(followingIds);
+    setBlockedProfiles(blockedIds);
     setBadges(badgeRows);
+    setIsModerator(moderatorStatus);
+    setTermsRequired(!resolvedProfile.terms_accepted_at);
+    setModerationReports(moderatorStatus ? await loadModerationQueue() : []);
     setRequests(
       requestRows
         .map((request) => String(request.drink_name || ""))
@@ -4307,6 +4627,9 @@ export default function App() {
     const authSubscription = supabase.auth.onAuthStateChange(
       (event, nextSession) => {
         if (event === "INITIAL_SESSION") return;
+        if (event === "PASSWORD_RECOVERY") {
+          setPasswordRecoveryVisible(true);
+        }
         setTimeout(() => {
           void applySession(nextSession).catch((error) =>
             Alert.alert("Could not load your account", error.message),
@@ -4367,11 +4690,12 @@ export default function App() {
     followedProfiles,
   ]);
   const appDrinks = catalogueDrinks.length ? catalogueDrinks : drinks;
-  const appProfiles = databaseProfiles.length
-    ? databaseProfiles
-    : searchableProfiles;
+  const appProfiles = (
+    databaseProfiles.length ? databaseProfiles : searchableProfiles
+  ).filter((profile) => !blockedProfiles.includes(profile.id));
   const go = (nextScreen: Screen) => {
     if (nextScreen === "search") setSearchReturn(screen);
+    if (nextScreen === "profile") setBadgeTab(false);
     setScreen(nextScreen);
   };
   const open = (d: Drink) => {
@@ -4480,6 +4804,103 @@ export default function App() {
         "Could not update buddy",
         error instanceof Error ? error.message : "Please try again.",
       );
+    }
+  };
+  const openReport = (target: ReportTarget) => {
+    if (!requireAccount()) return;
+    setReportTarget(target);
+  };
+  const submitActiveReport = async (
+    reason: Parameters<typeof submitContentReport>[0]["reason"],
+    details: string,
+  ) => {
+    if (!reportTarget) return;
+    await submitContentReport({
+      targetType: reportTarget.type,
+      targetId: reportTarget.id,
+      reason,
+      details,
+    });
+    Alert.alert(
+      "Report received",
+      "Thank you. A Saturated moderator will review it.",
+    );
+    if (isModerator) setModerationReports(await loadModerationQueue());
+  };
+  const toggleBlockedProfile = async (profile: SearchProfile) => {
+    if (!requireAccount()) return;
+    const currentlyBlocked = blockedProfiles.includes(profile.id);
+    if (currentlyBlocked) {
+      await unblockProfile(profile.id);
+      setBlockedProfiles((current) =>
+        current.filter((profileId) => profileId !== profile.id),
+      );
+      await refreshDatabaseState(session);
+      return;
+    }
+    Alert.alert(
+      `Block ${profile.name}?`,
+      "You will stop seeing each other's profiles, reviews and comments. Any buddy connection will be removed.",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Block",
+          style: "destructive",
+          onPress: () => {
+            void blockProfile(profile.id)
+              .then(async () => {
+                setBlockedProfiles((current) => [
+                  ...new Set([...current, profile.id]),
+                ]);
+                setFollowedProfiles((current) =>
+                  current.filter((profileId) => profileId !== profile.id),
+                );
+                await refreshDatabaseState(session);
+                setScreen(profileReturn);
+              })
+              .catch((error) =>
+                Alert.alert(
+                  "Could not block user",
+                  error instanceof Error ? error.message : "Please try again.",
+                ),
+              );
+          },
+        },
+      ],
+    );
+  };
+  const refreshModeration = async () => {
+    try {
+      setModerationReports(await loadModerationQueue());
+    } catch (error) {
+      Alert.alert(
+        "Could not load reports",
+        error instanceof Error ? error.message : "Please try again.",
+      );
+    }
+  };
+  const moderateReport = async (
+    report: DatabaseModerationReport,
+    action:
+      | "dismiss"
+      | "hide_content"
+      | "restore_content"
+      | "suspend_user"
+      | "reinstate_user"
+      | "resolve_no_action",
+  ) => {
+    try {
+      setModerationBusyId(report.id);
+      await resolveModerationReport(report.id, action);
+      await refreshDatabaseState(session);
+      setModerationReports(await loadModerationQueue());
+    } catch (error) {
+      Alert.alert(
+        "Moderation action failed",
+        error instanceof Error ? error.message : "Please try again.",
+      );
+    } finally {
+      setModerationBusyId(undefined);
     }
   };
   const toggle = async (id: string) => {
@@ -4644,6 +5065,15 @@ export default function App() {
         onReview={() => review(selected)}
         onToggle={() => void toggle(selected.id)}
         onLike={(id) => void like(id)}
+        onReportReview={(reviewToReport) =>
+          reviewToReport.userId === session?.user.id
+            ? Alert.alert("Your review", "You cannot report your own review.")
+            : openReport({
+                type: "review",
+                id: reviewToReport.id,
+                label: `${reviewToReport.user}: ${reviewToReport.text}`,
+              })
+        }
         likedReviewIds={likedReviews}
         onOpenReview={openReview}
         onOpenProfile={openProfileByName}
@@ -4662,6 +5092,24 @@ export default function App() {
         onBack={() => setScreen(reviewDetailReturn)}
         onLike={() => void like(selectedReview.id)}
         onAddComment={(text) => void addComment(selectedReview.id, text)}
+        onReportReview={(reviewToReport) =>
+          reviewToReport.userId === session?.user.id
+            ? Alert.alert("Your review", "You cannot report your own review.")
+            : openReport({
+                type: "review",
+                id: reviewToReport.id,
+                label: `${reviewToReport.user}: ${reviewToReport.text}`,
+              })
+        }
+        onReportComment={(commentToReport) =>
+          commentToReport.userId === session?.user.id
+            ? Alert.alert("Your comment", "You cannot report your own comment.")
+            : openReport({
+                type: "comment",
+                id: commentToReport.id,
+                label: `${commentToReport.user}: ${commentToReport.text}`,
+              })
+        }
         onOpenProfile={openProfileByName}
         onOpenDrink={open}
         activeTab={reviewDetailTab}
@@ -4757,7 +5205,16 @@ export default function App() {
         badgeTab={badgeTab}
         setBadgeTab={setBadgeTab}
         followed={followedProfiles.includes(selectedProfile.id)}
+        blocked={blockedProfiles.includes(selectedProfile.id)}
         onToggleFollow={() => void followProfile(selectedProfile.id)}
+        onToggleBlock={() => void toggleBlockedProfile(selectedProfile)}
+        onReportProfile={() =>
+          openReport({
+            type: "profile",
+            id: selectedProfile.id,
+            label: `${selectedProfile.name} (${selectedProfile.handle})`,
+          })
+        }
         onBack={() => setScreen(profileReturn)}
         onGo={go}
         onEditReview={editReview}
@@ -4833,6 +5290,10 @@ export default function App() {
           );
           setDatabaseProfiles((await loadProfiles()).map(profileFromDatabase));
         }}
+        onExportData={async () => {
+          if (!session) throw new Error("Sign in to export your data.");
+          return exportCurrentUserData(session.user.id);
+        }}
         onDeleteAccount={() => {
           void deleteCurrentAccount().catch((error) =>
             Alert.alert("Could not delete account", error.message),
@@ -4844,6 +5305,18 @@ export default function App() {
           setOnboard(true);
           setScreen("splash");
         }}
+        isModerator={isModerator}
+        onModeration={() => setScreen("moderation")}
+      />
+    );
+  else if (screen === "moderation")
+    body = (
+      <ModerationScreen
+        reports={moderationReports}
+        busyId={moderationBusyId}
+        onBack={() => setScreen("settings")}
+        onRefresh={() => void refreshModeration()}
+        onResolve={(report, action) => void moderateReport(report, action)}
       />
     );
   else
@@ -4875,15 +5348,18 @@ export default function App() {
         visible={onboard}
         onEmailSignIn={async (accountEmail, password, dateOfBirth) => {
           await AsyncStorage.setItem(PENDING_BIRTH_DATE_KEY, dateOfBirth);
+          await AsyncStorage.setItem(PENDING_TERMS_ACCEPTANCE_KEY, "accepted");
           try {
             await signInWithEmail(accountEmail, password);
           } catch (error) {
             await AsyncStorage.removeItem(PENDING_BIRTH_DATE_KEY);
+            await AsyncStorage.removeItem(PENDING_TERMS_ACCEPTANCE_KEY);
             throw error;
           }
         }}
         onEmailSignUp={async (details) => {
           await AsyncStorage.setItem(PENDING_USERNAME_KEY, details.username);
+          await AsyncStorage.setItem(PENDING_TERMS_ACCEPTANCE_KEY, "accepted");
           if (details.avatarUri)
             await AsyncStorage.setItem(
               PENDING_AVATAR_URI_KEY,
@@ -4896,6 +5372,7 @@ export default function App() {
           } catch (error) {
             await AsyncStorage.removeItem(PENDING_AVATAR_URI_KEY);
             await AsyncStorage.removeItem(PENDING_USERNAME_KEY);
+            await AsyncStorage.removeItem(PENDING_TERMS_ACCEPTANCE_KEY);
             throw error;
           }
           if (result.session && details.avatarUri) {
@@ -4910,13 +5387,46 @@ export default function App() {
         }}
         onProvider={async (provider, dateOfBirth) => {
           await AsyncStorage.setItem(PENDING_BIRTH_DATE_KEY, dateOfBirth);
+          await AsyncStorage.setItem(PENDING_TERMS_ACCEPTANCE_KEY, "accepted");
           try {
             await signInWithProvider(provider);
           } catch (error) {
             await AsyncStorage.removeItem(PENDING_BIRTH_DATE_KEY);
+            await AsyncStorage.removeItem(PENDING_TERMS_ACCEPTANCE_KEY);
             throw error;
           }
         }}
+        onForgotPassword={sendPasswordResetEmail}
+      />
+      <ReportModal
+        target={reportTarget}
+        onClose={() => setReportTarget(null)}
+        onSubmit={submitActiveReport}
+      />
+      <TermsAcceptanceModal
+        visible={Boolean(session) && termsRequired && !onboard}
+        onOpenTerms={() =>
+          void Linking.openURL(
+            "https://suppixie.github.io/Saturated-App/terms/",
+          )
+        }
+        onOpenGuidelines={() =>
+          void Linking.openURL(
+            "https://suppixie.github.io/Saturated-App/community-guidelines/",
+          )
+        }
+        onAccept={async () => {
+          const acceptedAt = await acceptCommunityTerms();
+          setCurrentProfile((profile) =>
+            profile ? { ...profile, terms_accepted_at: acceptedAt } : profile,
+          );
+          setTermsRequired(false);
+        }}
+      />
+      <PasswordResetModal
+        visible={passwordRecoveryVisible}
+        onClose={() => setPasswordRecoveryVisible(false)}
+        onSave={updatePassword}
       />
     </SafeAreaProvider>
   );

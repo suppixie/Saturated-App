@@ -8,7 +8,7 @@
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
     "ios": {
-      "supportsTablet": true,
+      "supportsTablet": false,
       "bundleIdentifier": "com.suppixie.saturated"
     },
     "android": {
@@ -26,8 +26,8 @@
       [
         "expo-image-picker",
         {
-          "photosPermission": "Allow Saturated to choose profile and review photos.",
-          "cameraPermission": "Allow Saturated to take profile and review photos."
+          "photosPermission": "Allow Saturated to choose a profile photo.",
+          "cameraPermission": "Allow Saturated to take a profile photo."
         }
       ]
     ],
