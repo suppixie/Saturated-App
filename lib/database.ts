@@ -1,4 +1,6 @@
 import type { User } from "@supabase/supabase-js";
+import { File as ExpoFile } from "expo-file-system";
+import { Platform } from "react-native";
 
 import { supabase } from "./supabase";
 
@@ -515,8 +517,15 @@ async function uploadPublicImage(
         ? "image/webp"
         : "image/jpeg";
   const path = `${ownerId}/${Date.now()}.${extension}`;
-  const file = await fetch(uri);
-  const bytes = await file.arrayBuffer();
+  const bytes =
+    Platform.OS === "web"
+      ? await (await fetch(uri)).arrayBuffer()
+      : await new ExpoFile(uri).arrayBuffer();
+  if (bytes.byteLength < 256) {
+    throw new Error(
+      "The selected image could not be read. Please choose the photo again.",
+    );
+  }
   const upload = await client()
     .storage.from(bucket)
     .upload(path, bytes, { contentType, upsert: false });
@@ -530,9 +539,15 @@ export async function uploadAvatar(userId: string, uri: string) {
   const response = await client()
     .from("profiles")
     .update({ avatar_url: uploaded.publicUrl })
-    .eq("id", userId);
-  result(response.data, response.error);
-  return uploaded.publicUrl;
+    .eq("id", userId)
+    .select("avatar_url")
+    .single();
+  const profile = result(response.data, response.error) as {
+    avatar_url: string | null;
+  };
+  if (!profile.avatar_url)
+    throw new Error("The uploaded picture was not saved to your profile.");
+  return profile.avatar_url;
 }
 
 export async function uploadReviewImage(

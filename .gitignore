@@ -29,6 +29,7 @@ yarn-debug.*
 yarn-error.*
 expo-web*.log
 expo-phone*.log
+.codex-expo-*.log
 .catalogue-work/
 
 # macOS

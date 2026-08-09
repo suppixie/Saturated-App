@@ -19,7 +19,17 @@
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
       },
+      "softwareKeyboardLayoutMode": "resize",
       "predictiveBackGestureEnabled": false
+    },
+    "androidNavigationBar": {
+      "backgroundColor": "#F8FBE9",
+      "barStyle": "dark-content"
+    },
+    "androidStatusBar": {
+      "backgroundColor": "#F8FBE9",
+      "barStyle": "dark-content",
+      "translucent": false
     },
     "scheme": "saturated",
     "plugins": [
@@ -29,7 +39,8 @@
           "photosPermission": "Allow Saturated to choose a profile photo.",
           "cameraPermission": "Allow Saturated to take a profile photo."
         }
-      ]
+      ],
+      "expo-sharing"
     ],
     "extra": {
       "eas": {
