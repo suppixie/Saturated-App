@@ -42,6 +42,8 @@ import {
 } from "lucide-react-native";
 import React, {
   createContext,
+  memo,
+  useCallback,
   useContext,
   useEffect,
   useMemo,
@@ -82,6 +84,7 @@ import {
   StyleProp,
   Text,
   TextInput,
+  TouchableWithoutFeedback,
   useWindowDimensions,
   View,
 } from "react-native";
@@ -715,12 +718,14 @@ function Background({
           <View style={s.bgMint} />
           {/* Noise is intentionally hidden; keep the layered colour background. */}
         </BlurTargetView>
-        <KeyboardAvoidingView
-          style={[s.backgroundContent, responsiveInsets]}
-          behavior={Platform.OS === "ios" ? "padding" : undefined}
-        >
-          {children}
-        </KeyboardAvoidingView>
+        <TouchableWithoutFeedback accessible={false} onPress={Keyboard.dismiss}>
+          <KeyboardAvoidingView
+            style={[s.backgroundContent, responsiveInsets]}
+            behavior={Platform.OS === "ios" ? "padding" : "height"}
+          >
+            {children}
+          </KeyboardAvoidingView>
+        </TouchableWithoutFeedback>
       </View>
     </BlurTargetContext.Provider>
   );
@@ -754,7 +759,11 @@ function DrinkCardGlow() {
   );
 }
 
-function DrinkCardVisual({ drink }: { drink: Drink }) {
+const DrinkCardVisual = memo(function DrinkCardVisual({
+  drink,
+}: {
+  drink: Drink;
+}) {
   const [imageFailed, setImageFailed] = useState(false);
   useEffect(() => setImageFailed(false), [drink.id, drink.image]);
   const remoteImage =
@@ -765,11 +774,27 @@ function DrinkCardVisual({ drink }: { drink: Drink }) {
   const isSmallRootBeer = drink.id === "a-and-w-root-beer";
   return (
     <View style={s.drinkCardSurface}>
-      <GlassLayers
-        radius={16}
-        intensity={15}
-        colors={["rgba(255,255,255,.5)", "rgba(255,255,255,.08)"]}
-      />
+      {Platform.OS === "android" ? (
+        <>
+          <LinearGradient
+            pointerEvents="none"
+            colors={["rgba(255,255,255,.52)", "rgba(4,178,100,.1)"]}
+            start={{ x: 0.12, y: 0 }}
+            end={{ x: 0.88, y: 1 }}
+            style={[s.glassGradient, { borderRadius: 16 }]}
+          />
+          <View
+            pointerEvents="none"
+            style={[s.glassInnerEdge, { borderRadius: 16 }]}
+          />
+        </>
+      ) : (
+        <GlassLayers
+          radius={16}
+          intensity={15}
+          colors={["rgba(255,255,255,.5)", "rgba(255,255,255,.08)"]}
+        />
+      )}
       <DrinkCardGlow />
       <View style={s.drinkImageFrame}>
         {!imageFailed && (
@@ -782,6 +807,8 @@ function DrinkCardVisual({ drink }: { drink: Drink }) {
               isSmallRootBeer && s.rootBeerExploreImage,
             ]}
             resizeMode="contain"
+            fadeDuration={0}
+            progressiveRenderingEnabled
             onError={() => setImageFailed(true)}
           />
         )}
@@ -794,7 +821,7 @@ function DrinkCardVisual({ drink }: { drink: Drink }) {
       </View>
     </View>
   );
-}
+});
 
 function ExploreDrinkRail({
   title,
@@ -833,15 +860,19 @@ function ExploreDrinkRail({
           </Pressable>
         )}
       </View>
-      <ScrollView
+      <FlatList
         horizontal
+        data={items}
+        keyExtractor={(drink) => `${title}-${drink.id}`}
         style={s.exploreRailScroller}
         showsHorizontalScrollIndicator={false}
         contentContainerStyle={s.exploreRail}
-      >
-        {items.map((drink) => (
+        initialNumToRender={4}
+        maxToRenderPerBatch={4}
+        windowSize={3}
+        removeClippedSubviews={Platform.OS === "android"}
+        renderItem={({ item: drink }) => (
           <Pressable
-            key={`${title}-${drink.id}`}
             accessibilityRole="button"
             accessibilityLabel={`Open ${drink.name}`}
             onPress={() => onOpen(drink)}
@@ -849,8 +880,8 @@ function ExploreDrinkRail({
           >
             <DrinkCardVisual drink={drink} />
           </Pressable>
-        ))}
-      </ScrollView>
+        )}
+      />
     </View>
   );
 }
@@ -1297,6 +1328,7 @@ function Onboarding({
   const [accountMode, setAccountMode] = useState<"social" | "email" | "create">(
     "social",
   );
+  const emailLoginScrollRef = useRef<ScrollView | null>(null);
   useEffect(() => {
     if (!visible) {
       setAccountMode("social");
@@ -1495,249 +1527,80 @@ function Onboarding({
         style={accountMode === "social" ? "light" : "dark"}
         hidden={false}
       />
-      {accountMode === "create" ? (
-        <SafeAreaView style={s.createAccountScreen}>
-          <KeyboardAvoidingView
-            style={{ flex: 1 }}
-            behavior={Platform.OS === "ios" ? "padding" : undefined}
-          >
-            <ScrollView
-              showsVerticalScrollIndicator={false}
-              keyboardShouldPersistTaps="handled"
-              contentContainerStyle={s.createAccountContent}
+      <TouchableWithoutFeedback accessible={false} onPress={Keyboard.dismiss}>
+        {accountMode === "create" ? (
+          <SafeAreaView style={s.createAccountScreen}>
+            <KeyboardAvoidingView
+              style={{ flex: 1 }}
+              behavior={Platform.OS === "ios" ? "padding" : "height"}
             >
-              <Text style={s.createAccountTitle}>Create your account</Text>
-              <Text numberOfLines={1} adjustsFontSizeToFit style={s.onboardAge}>
-                You must be 18+ to use Saturated.
-              </Text>
-              <Pressable
-                accessibilityRole="button"
-                accessibilityLabel="Choose an optional profile photo"
-                style={s.createAvatarButton}
-                onPress={() => void chooseProfilePhoto()}
+              <ScrollView
+                showsVerticalScrollIndicator={false}
+                keyboardShouldPersistTaps="handled"
+                keyboardDismissMode="on-drag"
+                contentContainerStyle={s.createAccountContent}
               >
-                <UserAvatar
-                  name={
-                    `${firstName} ${lastName}`.trim() ||
-                    chosenUsername ||
-                    "Saturated User"
-                  }
-                  source={avatarUri ? { uri: avatarUri } : undefined}
-                  size={84}
-                />
-                <View style={s.createAvatarCamera}>
-                  <Camera size={15} color="#fff" />
+                <Text style={s.createAccountTitle}>Create your account</Text>
+                <Text
+                  numberOfLines={1}
+                  adjustsFontSizeToFit
+                  style={s.onboardAge}
+                >
+                  You must be 18+ because we have content about alcohol.
+                </Text>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Choose an optional profile photo"
+                  style={s.createAvatarButton}
+                  onPress={() => void chooseProfilePhoto()}
+                >
+                  <UserAvatar
+                    name={
+                      `${firstName} ${lastName}`.trim() ||
+                      chosenUsername ||
+                      "Saturated User"
+                    }
+                    source={avatarUri ? { uri: avatarUri } : undefined}
+                    size={84}
+                  />
+                  <View style={s.createAvatarCamera}>
+                    <Camera size={15} color="#fff" />
+                  </View>
+                </Pressable>
+                <Text style={s.createAvatarHint}>Profile photo (optional)</Text>
+                <View style={s.createNameRow}>
+                  <TextInput
+                    value={firstName}
+                    onChangeText={setFirstName}
+                    placeholder="First name"
+                    placeholderTextColor="rgba(32,26,27,.62)"
+                    style={[s.input, s.createAccountInput, s.createNameInput]}
+                  />
+                  <TextInput
+                    value={lastName}
+                    onChangeText={setLastName}
+                    placeholder="Last name"
+                    placeholderTextColor="rgba(32,26,27,.62)"
+                    style={[s.input, s.createAccountInput, s.createNameInput]}
+                  />
                 </View>
-              </Pressable>
-              <Text style={s.createAvatarHint}>Profile photo (optional)</Text>
-              <View style={s.createNameRow}>
                 <TextInput
-                  value={firstName}
-                  onChangeText={setFirstName}
-                  placeholder="First name"
+                  value={chosenUsername}
+                  onChangeText={setChosenUsername}
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  placeholder="Username"
                   placeholderTextColor="rgba(32,26,27,.62)"
-                  style={[s.input, s.createAccountInput, s.createNameInput]}
+                  style={[s.input, s.createAccountInput]}
                 />
                 <TextInput
-                  value={lastName}
-                  onChangeText={setLastName}
-                  placeholder="Last name"
-                  placeholderTextColor="rgba(32,26,27,.62)"
-                  style={[s.input, s.createAccountInput, s.createNameInput]}
-                />
-              </View>
-              <TextInput
-                value={chosenUsername}
-                onChangeText={setChosenUsername}
-                autoCapitalize="none"
-                autoCorrect={false}
-                placeholder="Username"
-                placeholderTextColor="rgba(32,26,27,.62)"
-                style={[s.input, s.createAccountInput]}
-              />
-              <TextInput
-                value={email}
-                onChangeText={setEmail}
-                autoCapitalize="none"
-                keyboardType="email-address"
-                placeholder="Email address"
-                placeholderTextColor="rgba(32,26,27,.62)"
-                style={[s.input, s.createAccountInput]}
-              />
-              <TextInput
-                value={password}
-                onChangeText={setPassword}
-                autoCapitalize="none"
-                secureTextEntry
-                placeholder="Password (8+ characters)"
-                placeholderTextColor="rgba(32,26,27,.62)"
-                style={[s.input, s.createAccountInput]}
-              />
-              {birthDateField}
-              {termsField}
-              <Pressable
-                style={[s.primary, s.onboardControl]}
-                accessibilityRole="button"
-                accessibilityLabel="Create account"
-                disabled={busy}
-                onPress={() => void finishEmail()}
-              >
-                {busy ? (
-                  <ActivityIndicator color="#fff" />
-                ) : (
-                  <Text style={s.primaryText}>Create account</Text>
-                )}
-              </Pressable>
-              {noticeContent}
-              <Pressable
-                accessibilityRole="button"
-                accessibilityLabel="Back to sign in options"
-                onPress={() => {
-                  setNotice("");
-                  setAccountMode("social");
-                }}
-                style={s.textButton}
-              >
-                <Text style={s.textButtonText}>Back to sign in options</Text>
-              </Pressable>
-            </ScrollView>
-          </KeyboardAvoidingView>
-        </SafeAreaView>
-      ) : accountMode === "email" ? (
-        <SafeAreaView style={s.createAccountScreen}>
-          <KeyboardAvoidingView
-            style={{ flex: 1 }}
-            behavior={Platform.OS === "ios" ? "padding" : undefined}
-          >
-            <ScrollView
-              bounces={false}
-              showsVerticalScrollIndicator={false}
-              keyboardShouldPersistTaps="handled"
-              contentContainerStyle={s.emailLoginContent}
-            >
-              <Pressable
-                accessibilityRole="button"
-                accessibilityLabel="Back to sign in options"
-                onPress={() => {
-                  setNotice("");
-                  setAccountMode("social");
-                }}
-                style={s.fullScreenAuthBack}
-              >
-                <ArrowLeftCircle size={27} color={C.ink} />
-              </Pressable>
-              <Text style={s.createAccountTitle}>Sign in</Text>
-              <TextInput
-                value={email}
-                onChangeText={setEmail}
-                autoCapitalize="none"
-                keyboardType="email-address"
-                placeholder="Email address"
-                placeholderTextColor="rgba(32,26,27,.62)"
-                style={[s.input, s.createAccountInput]}
-              />
-              <TextInput
-                value={password}
-                onChangeText={setPassword}
-                autoCapitalize="none"
-                secureTextEntry
-                placeholder="Password (8+ characters)"
-                placeholderTextColor="rgba(32,26,27,.62)"
-                style={[s.input, s.createAccountInput]}
-              />
-              <Pressable
-                style={[s.primary, s.onboardControl]}
-                accessibilityRole="button"
-                accessibilityLabel="Sign in"
-                disabled={busy}
-                onPress={() => void finishEmail()}
-              >
-                {busy ? (
-                  <ActivityIndicator color="#fff" />
-                ) : (
-                  <Text style={s.primaryText}>Sign in</Text>
-                )}
-              </Pressable>
-              <Pressable
-                accessibilityRole="button"
-                accessibilityLabel="Reset forgotten password"
-                disabled={busy}
-                onPress={() => {
-                  if (!email.trim() || !email.includes("@")) {
-                    showFormError("Enter your email address first.");
-                    return;
-                  }
-                  void run(async () => {
-                    await onForgotPassword(email.trim());
-                    setNoticeTone("success");
-                    setNotice(
-                      "Password reset sent. Open the email link, then return to Saturated.",
-                    );
-                  });
-                }}
-                style={s.textButton}
-              >
-                <Text style={s.textButtonText}>Forgot password?</Text>
-              </Pressable>
-              {noticeContent}
-            </ScrollView>
-          </KeyboardAvoidingView>
-        </SafeAreaView>
-      ) : (
-        <SafeAreaView style={s.modalWrap} edges={["bottom"]}>
-          <View style={s.onboard}>
-            <View style={s.handle} />
-            <Text style={s.onboardTitle}>Welcome to Saturated</Text>
-            <Text numberOfLines={1} adjustsFontSizeToFit style={s.onboardAge}>
-              You must be 18+ to use Saturated.
-            </Text>
-            {birthDateField}
-            {accountMode === "social" ? (
-              <>
-                <Text style={s.loginWithTitle}>Login with</Text>
-                <View style={s.loginIconRow}>
-                  <Pressable
-                    accessibilityRole="button"
-                    accessibilityLabel="Continue with Google"
-                    style={s.loginIconButton}
-                    disabled={busy}
-                    onPress={() => void finishProvider("google")}
-                  >
-                    <GoogleLogo size={25} />
-                  </Pressable>
-                  <Pressable
-                    accessibilityRole="button"
-                    accessibilityLabel="Continue with Apple"
-                    style={s.loginIconButton}
-                    disabled={busy}
-                    onPress={() => void finishProvider("apple")}
-                  >
-                    <AppleLogo size={25} />
-                  </Pressable>
-                  <Pressable
-                    accessibilityRole="button"
-                    accessibilityLabel="Continue with email"
-                    style={s.loginIconButton}
-                    onPress={() => {
-                      setNotice("");
-                      setAccountMode("email");
-                    }}
-                  >
-                    <Mail size={24} color={C.teal} />
-                  </Pressable>
-                </View>
-              </>
-            ) : (
-              <>
-                <TextInput
-                  autoFocus
                   value={email}
                   onChangeText={setEmail}
                   autoCapitalize="none"
                   keyboardType="email-address"
                   placeholder="Email address"
-                  placeholderTextColor="rgba(32,26,27,.45)"
-                  style={s.input}
+                  placeholderTextColor="rgba(32,26,27,.62)"
+                  style={[s.input, s.createAccountInput]}
                 />
                 <TextInput
                   value={password}
@@ -1745,13 +1608,96 @@ function Onboarding({
                   autoCapitalize="none"
                   secureTextEntry
                   placeholder="Password (8+ characters)"
-                  placeholderTextColor="rgba(32,26,27,.45)"
-                  style={s.input}
+                  placeholderTextColor="rgba(32,26,27,.62)"
+                  style={[s.input, s.createAccountInput]}
+                />
+                {birthDateField}
+                {termsField}
+                <Pressable
+                  style={[s.primary, s.onboardControl]}
+                  accessibilityRole="button"
+                  accessibilityLabel="Create account"
+                  disabled={busy}
+                  onPress={() => void finishEmail()}
+                >
+                  {busy ? (
+                    <ActivityIndicator color="#fff" />
+                  ) : (
+                    <Text style={s.primaryText}>Create account</Text>
+                  )}
+                </Pressable>
+                {noticeContent}
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Back to sign in options"
+                  onPress={() => {
+                    setNotice("");
+                    setAccountMode("social");
+                  }}
+                  style={s.textButton}
+                >
+                  <Text style={s.textButtonText}>Back to sign in options</Text>
+                </Pressable>
+              </ScrollView>
+            </KeyboardAvoidingView>
+          </SafeAreaView>
+        ) : accountMode === "email" ? (
+          <SafeAreaView style={s.createAccountScreen}>
+            <KeyboardAvoidingView
+              style={{ flex: 1 }}
+              behavior={Platform.OS === "ios" ? "padding" : "height"}
+            >
+              <ScrollView
+                ref={emailLoginScrollRef}
+                bounces={false}
+                showsVerticalScrollIndicator={false}
+                keyboardShouldPersistTaps="handled"
+                keyboardDismissMode="on-drag"
+                contentContainerStyle={s.emailLoginContent}
+              >
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Back to sign in options"
+                  onPress={() => {
+                    setNotice("");
+                    setAccountMode("social");
+                  }}
+                  style={s.fullScreenAuthBack}
+                >
+                  <ArrowLeftCircle size={27} color={C.ink} />
+                </Pressable>
+                <Text style={s.createAccountTitle}>Sign in</Text>
+                <TextInput
+                  value={email}
+                  onChangeText={setEmail}
+                  autoCapitalize="none"
+                  keyboardType="email-address"
+                  placeholder="Email address"
+                  placeholderTextColor="rgba(32,26,27,.62)"
+                  style={[s.input, s.createAccountInput]}
+                />
+                <TextInput
+                  value={password}
+                  onChangeText={setPassword}
+                  autoCapitalize="none"
+                  secureTextEntry
+                  onFocus={() =>
+                    setTimeout(
+                      () =>
+                        emailLoginScrollRef.current?.scrollToEnd({
+                          animated: true,
+                        }),
+                      120,
+                    )
+                  }
+                  placeholder="Password (8+ characters)"
+                  placeholderTextColor="rgba(32,26,27,.62)"
+                  style={[s.input, s.createAccountInput]}
                 />
                 <Pressable
                   style={[s.primary, s.onboardControl]}
                   accessibilityRole="button"
-                  accessibilityLabel={"Sign in"}
+                  accessibilityLabel="Sign in"
                   disabled={busy}
                   onPress={() => void finishEmail()}
                 >
@@ -1782,36 +1728,142 @@ function Onboarding({
                 >
                   <Text style={s.textButtonText}>Forgot password?</Text>
                 </Pressable>
-                <Pressable
-                  accessibilityRole="button"
-                  accessibilityLabel="Back to sign in options"
-                  onPress={() => {
-                    setNotice("");
-                    setAccountMode("social");
-                  }}
-                  style={s.textButton}
-                >
-                  <Text style={s.textButtonText}>Back to sign in options</Text>
-                </Pressable>
-              </>
-            )}
-            {noticeContent}
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel="Create an account"
-              style={s.createAccountButton}
-              onPress={() => {
-                setNotice("");
-                setAccountMode("create");
-              }}
-            >
-              <UserPlus size={18} color={C.red} />
-              <Text style={s.createAccountText}>Create an account</Text>
-            </Pressable>
-            {termsField}
-          </View>
-        </SafeAreaView>
-      )}
+                {noticeContent}
+              </ScrollView>
+            </KeyboardAvoidingView>
+          </SafeAreaView>
+        ) : (
+          <SafeAreaView style={s.modalWrap} edges={["bottom"]}>
+            <View style={s.onboard}>
+              <View style={s.handle} />
+              <Text style={s.onboardTitle}>Welcome</Text>
+              <Text numberOfLines={1} adjustsFontSizeToFit style={s.onboardAge}>
+                You must be 18+ because we have content about alcohol.
+              </Text>
+              {birthDateField}
+              {accountMode === "social" ? (
+                <>
+                  <Text style={s.loginWithTitle}>Login with</Text>
+                  <View style={s.loginIconRow}>
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel="Continue with Google"
+                      style={s.loginIconButton}
+                      disabled={busy}
+                      onPress={() => void finishProvider("google")}
+                    >
+                      <GoogleLogo size={25} />
+                    </Pressable>
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel="Continue with Apple"
+                      style={s.loginIconButton}
+                      disabled={busy}
+                      onPress={() => void finishProvider("apple")}
+                    >
+                      <AppleLogo size={25} />
+                    </Pressable>
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel="Continue with email"
+                      style={s.loginIconButton}
+                      onPress={() => {
+                        setNotice("");
+                        setAccountMode("email");
+                      }}
+                    >
+                      <Mail size={24} color={C.teal} />
+                    </Pressable>
+                  </View>
+                </>
+              ) : (
+                <>
+                  <TextInput
+                    autoFocus
+                    value={email}
+                    onChangeText={setEmail}
+                    autoCapitalize="none"
+                    keyboardType="email-address"
+                    placeholder="Email address"
+                    placeholderTextColor="rgba(32,26,27,.45)"
+                    style={s.input}
+                  />
+                  <TextInput
+                    value={password}
+                    onChangeText={setPassword}
+                    autoCapitalize="none"
+                    secureTextEntry
+                    placeholder="Password (8+ characters)"
+                    placeholderTextColor="rgba(32,26,27,.45)"
+                    style={s.input}
+                  />
+                  <Pressable
+                    style={[s.primary, s.onboardControl]}
+                    accessibilityRole="button"
+                    accessibilityLabel={"Sign in"}
+                    disabled={busy}
+                    onPress={() => void finishEmail()}
+                  >
+                    {busy ? (
+                      <ActivityIndicator color="#fff" />
+                    ) : (
+                      <Text style={s.primaryText}>Sign in</Text>
+                    )}
+                  </Pressable>
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel="Reset forgotten password"
+                    disabled={busy}
+                    onPress={() => {
+                      if (!email.trim() || !email.includes("@")) {
+                        showFormError("Enter your email address first.");
+                        return;
+                      }
+                      void run(async () => {
+                        await onForgotPassword(email.trim());
+                        setNoticeTone("success");
+                        setNotice(
+                          "Password reset sent. Open the email link, then return to Saturated.",
+                        );
+                      });
+                    }}
+                    style={s.textButton}
+                  >
+                    <Text style={s.textButtonText}>Forgot password?</Text>
+                  </Pressable>
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel="Back to sign in options"
+                    onPress={() => {
+                      setNotice("");
+                      setAccountMode("social");
+                    }}
+                    style={s.textButton}
+                  >
+                    <Text style={s.textButtonText}>
+                      Back to sign in options
+                    </Text>
+                  </Pressable>
+                </>
+              )}
+              {noticeContent}
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Create an account"
+                style={s.createAccountButton}
+                onPress={() => {
+                  setNotice("");
+                  setAccountMode("create");
+                }}
+              >
+                <UserPlus size={18} color={C.red} />
+                <Text style={s.createAccountText}>Create an account</Text>
+              </Pressable>
+              {termsField}
+            </View>
+          </SafeAreaView>
+        )}
+      </TouchableWithoutFeedback>
     </Modal>
   );
 }
@@ -2270,6 +2322,11 @@ function Explore({
           </Pressable>
         )}
         onEndReachedThreshold={0.35}
+        initialNumToRender={12}
+        maxToRenderPerBatch={12}
+        updateCellsBatchingPeriod={45}
+        windowSize={5}
+        removeClippedSubviews={Platform.OS === "android"}
         onEndReached={() => {
           if (visibleCount < shown.length) {
             setVisibleCount((current) =>
@@ -3712,7 +3769,7 @@ function BadgeCap({ earned = false }: { earned?: boolean }) {
       <Defs>
         <SvgRadialGradient id="badgeCap" cx="36%" cy="28%" rx="75%" ry="75%">
           <Stop offset="0" stopColor={earned ? "#fff1a8" : "#c9d8ce"} />
-          <Stop offset=".65" stopColor={earned ? "#e6aa36" : "#9eada5"} />
+          <Stop offset={0.65} stopColor={earned ? "#e6aa36" : "#9eada5"} />
           <Stop offset="1" stopColor={earned ? C.red : "#74837c"} />
         </SvgRadialGradient>
       </Defs>
@@ -3891,7 +3948,11 @@ function Profile({
     null,
   );
   const badgeSheetTranslateY = useRef(new Animated.Value(0)).current;
-  const closeBadgeSheet = () => {
+  const badgeSheetClosingRef = useRef(false);
+  const closeBadgeSheet = useCallback(() => {
+    if (badgeSheetClosingRef.current) return;
+    badgeSheetClosingRef.current = true;
+    badgeSheetTranslateY.stopAnimation();
     Animated.timing(badgeSheetTranslateY, {
       toValue: 300,
       duration: 180,
@@ -3900,8 +3961,9 @@ function Profile({
     }).start(() => {
       setSelectedBadgeName(null);
       badgeSheetTranslateY.setValue(0);
+      badgeSheetClosingRef.current = false;
     });
-  };
+  }, [badgeSheetTranslateY]);
   const badgeSheetPanResponder = useMemo(
     () =>
       PanResponder.create({
@@ -3932,7 +3994,7 @@ function Profile({
           }).start();
         },
       }),
-    [badgeSheetTranslateY],
+    [badgeSheetTranslateY, closeBadgeSheet],
   );
   const isOwn = !profile;
   const profileName = profile?.name || name || "Mark Kelly";
@@ -4279,6 +4341,8 @@ function Profile({
                   name={badgeName}
                   earned={badgeIsEarned(badgeName)}
                   onPress={() => {
+                    badgeSheetClosingRef.current = false;
+                    badgeSheetTranslateY.stopAnimation();
                     badgeSheetTranslateY.setValue(0);
                     setSelectedBadgeName(badgeName);
                   }}

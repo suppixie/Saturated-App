@@ -1712,10 +1712,18 @@ const s = StyleSheet.create({
   receiptWrap: {
     width: 374,
     alignSelf: "center",
-    shadowColor: "#000",
-    shadowOpacity: 0.12,
-    shadowRadius: 3,
-    shadowOffset: { width: 0, height: 3 },
+    ...(Platform.OS === "android"
+      ? {
+          boxShadow:
+            "-5px 5px 9px rgba(0,0,0,0.16), 5px 5px 9px rgba(0,0,0,0.16), 0px 8px 10px rgba(0,0,0,0.14)",
+        }
+      : {
+          shadowColor: "#000",
+          shadowOpacity: 0.2,
+          shadowRadius: 7,
+          shadowOffset: { width: 0, height: 6 },
+          elevation: 9,
+        }),
   },
   receipt: {
     width: "100%",
@@ -2424,11 +2432,11 @@ const s = StyleSheet.create({
   emailLoginContent: {
     width: "100%",
     maxWidth: FIGMA_FRAME_WIDTH,
-    minHeight: "100%",
+    flexGrow: 1,
     alignSelf: "center",
     paddingHorizontal: 28,
     paddingTop: 18,
-    paddingBottom: 18,
+    paddingBottom: 34,
     alignItems: "center",
     justifyContent: "center",
     gap: 14,
@@ -2622,6 +2630,8 @@ const s = StyleSheet.create({
     height: 44,
     borderRadius: 16,
     backgroundColor: "rgba(255,255,255,.8)",
+    borderWidth: 0.7,
+    borderColor: "rgba(43,73,89,.36)",
     paddingHorizontal: 15,
     fontFamily: F.regular,
     color: C.ink,

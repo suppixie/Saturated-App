@@ -511,6 +511,8 @@ export function GroupChatsScreen({
         <ScrollView
           key={`${activeGroup.id}-${messageVersion}`}
           showsVerticalScrollIndicator={false}
+          keyboardDismissMode="on-drag"
+          keyboardShouldPersistTaps="handled"
           contentContainerStyle={styles.messages}
         >
           {messageLoading && <ActivityIndicator color={C.red} />}
