@@ -48,6 +48,21 @@ export type SearchProfile = {
   avatar?: ImageSourcePropType;
 };
 
+export type ChatGroupVisibility = "public" | "private";
+
+export type ChatGroup = {
+  id: string;
+  ownerId: string;
+  name: string;
+  description: string;
+  drinkType: string;
+  visibility: ChatGroupVisibility;
+  inviteCode: string;
+  imageUrl?: string;
+  memberCount: number;
+  joined: boolean;
+};
+
 export type Screen =
   | "splash"
   | "explore"
@@ -61,4 +76,5 @@ export type Screen =
   | "moderation"
   | "review"
   | "reviewDetail"
-  | "feed";
+  | "feed"
+  | "groups";

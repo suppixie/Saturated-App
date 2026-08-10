@@ -1,0 +1,48 @@
+import type { ChatGroup } from "../types";
+
+export const starterChatGroups: ChatGroup[] = [
+  {
+    id: "starter-cocktail-club",
+    ownerId: "saturated",
+    name: "Cocktail Club",
+    description: "Recipes, bar finds and honest cocktail reviews.",
+    drinkType: "Cocktail",
+    visibility: "public",
+    inviteCode: "cocktail-club",
+    memberCount: 28,
+    joined: false,
+  },
+  {
+    id: "starter-coffee-corner",
+    ownerId: "saturated",
+    name: "Coffee Corner",
+    description: "For espresso obsessives and slow Sunday brews.",
+    drinkType: "Coffee",
+    visibility: "public",
+    inviteCode: "coffee-corner",
+    memberCount: 43,
+    joined: false,
+  },
+  {
+    id: "starter-pint-people",
+    ownerId: "saturated",
+    name: "Pint People",
+    description: "New taps, local breweries and the perfect pour.",
+    drinkType: "Beer",
+    visibility: "public",
+    inviteCode: "pint-people",
+    memberCount: 61,
+    joined: false,
+  },
+  {
+    id: "starter-zero-proof",
+    ownerId: "saturated",
+    name: "Zero Proof Finds",
+    description: "Great alcohol-free bottles worth adding to your list.",
+    drinkType: "Soft Drink",
+    visibility: "public",
+    inviteCode: "zero-proof-finds",
+    memberCount: 19,
+    joined: false,
+  },
+];

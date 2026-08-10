@@ -7,7 +7,8 @@
     "base": {
       "env": {
         "EXPO_PUBLIC_SUPABASE_URL": "https://ofjfulvhrzpqmldonzbr.supabase.co",
-        "EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY": "sb_publishable_OETlMYHQSe1OkoQc7mfI6w_Xrf9y0wE"
+        "EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY": "sb_publishable_OETlMYHQSe1OkoQc7mfI6w_Xrf9y0wE",
+        "EXPO_PUBLIC_AUTH_REDIRECT_URL": "saturated://auth/callback"
       }
     },
     "development": {

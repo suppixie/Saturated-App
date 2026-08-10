@@ -79,6 +79,47 @@ export type DatabaseBadge = {
   earned_at: string | null;
 };
 
+export type DatabaseChatGroup = {
+  id: string;
+  owner_id: string;
+  name: string;
+  description: string;
+  drink_type: string;
+  visibility: "public" | "private";
+  invite_code: string;
+  image_url: string | null;
+  member_count: number | string;
+  joined: boolean;
+  created_at: string;
+};
+
+export type DatabaseChatMessage = {
+  id: string;
+  group_id: string;
+  user_id: string;
+  body: string;
+  created_at: string;
+  profiles:
+    | {
+        display_name: string;
+        username: string | null;
+        avatar_url: string | null;
+      }
+    | {
+        display_name: string;
+        username: string | null;
+        avatar_url: string | null;
+      }[];
+};
+
+export type DatabaseChatMember = {
+  id: string;
+  display_name: string;
+  username: string | null;
+  avatar_url: string | null;
+  is_owner: boolean;
+};
+
 export type ReportTargetType = "profile" | "review" | "comment";
 
 export type ReportReason =
@@ -505,7 +546,7 @@ export async function exportCurrentUserData(userId: string) {
 }
 
 async function uploadPublicImage(
-  bucket: "avatars" | "review-images",
+  bucket: "avatars" | "review-images" | "group-images",
   ownerId: string,
   uri: string,
 ) {
@@ -532,6 +573,111 @@ async function uploadPublicImage(
   result(upload.data, upload.error);
   const publicUrl = client().storage.from(bucket).getPublicUrl(path);
   return { path, publicUrl: publicUrl.data.publicUrl };
+}
+
+export async function loadGroupChats() {
+  const response = await client().rpc("list_group_chats");
+  return result(response.data, response.error) as DatabaseChatGroup[];
+}
+
+export async function createGroupChat(input: {
+  ownerId: string;
+  name: string;
+  description: string;
+  drinkType: string;
+  visibility: "public" | "private";
+  inviteCode: string;
+  imageUrl?: string;
+}) {
+  const response = await client()
+    .from("group_chats")
+    .insert({
+      owner_id: input.ownerId,
+      name: input.name,
+      description: input.description,
+      drink_type: input.drinkType,
+      visibility: input.visibility,
+      invite_code: input.inviteCode,
+      image_url: input.imageUrl || null,
+    })
+    .select("*")
+    .single();
+  return result(response.data, response.error) as Omit<
+    DatabaseChatGroup,
+    "member_count" | "joined"
+  >;
+}
+
+export async function joinGroupChat(groupId: string) {
+  const response = await client().rpc("join_group_chat", {
+    target_group_id: groupId,
+  });
+  result(response.data, response.error);
+}
+
+export async function joinGroupChatByInvite(inviteCode: string) {
+  const response = await client().rpc("join_group_chat_by_invite", {
+    target_invite_code: inviteCode,
+  });
+  return result(response.data, response.error) as string;
+}
+
+export async function leaveGroupChat(groupId: string) {
+  const response = await client().rpc("leave_group_chat", {
+    target_group_id: groupId,
+  });
+  result(response.data, response.error);
+}
+
+export async function loadGroupChatMembers(groupId: string) {
+  const response = await client().rpc("list_group_chat_members", {
+    target_group_id: groupId,
+  });
+  return (result(response.data, response.error) || []) as DatabaseChatMember[];
+}
+
+export async function reportGroupChat(groupId: string) {
+  const userResponse = await client().auth.getUser();
+  const user = result(userResponse.data.user, userResponse.error) as User;
+  const response = await client().from("group_chat_reports").insert({
+    group_id: groupId,
+    reporter_id: user.id,
+    reason: "other",
+    details: "Reported from the group chat options menu.",
+  });
+  result(response.data, response.error);
+}
+
+export async function loadGroupChatMessages(groupId: string) {
+  const response = await client()
+    .from("group_chat_messages")
+    .select(
+      "id,group_id,user_id,body,created_at,profiles!group_chat_messages_user_id_fkey(display_name,username,avatar_url)",
+    )
+    .eq("group_id", groupId)
+    .order("created_at", { ascending: true })
+    .limit(100);
+  return result(response.data, response.error) as DatabaseChatMessage[];
+}
+
+export async function sendGroupChatMessage(
+  groupId: string,
+  userId: string,
+  body: string,
+) {
+  const response = await client()
+    .from("group_chat_messages")
+    .insert({ group_id: groupId, user_id: userId, body: body.trim() })
+    .select(
+      "id,group_id,user_id,body,created_at,profiles!group_chat_messages_user_id_fkey(display_name,username,avatar_url)",
+    )
+    .single();
+  return result(response.data, response.error) as DatabaseChatMessage;
+}
+
+export async function uploadGroupImage(userId: string, uri: string) {
+  const uploaded = await uploadPublicImage("group-images", userId, uri);
+  return uploaded.publicUrl;
 }
 
 export async function uploadAvatar(userId: string, uri: string) {

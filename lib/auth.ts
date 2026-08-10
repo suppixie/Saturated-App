@@ -1,7 +1,10 @@
 import type { OAuthAuthorizationDetails } from "@supabase/supabase-js";
-import { Linking, Platform } from "react-native";
+import * as WebBrowser from "expo-web-browser";
+import { Platform } from "react-native";
 
 import { supabase } from "./supabase";
+
+WebBrowser.maybeCompleteAuthSession();
 
 function requireSupabase() {
   if (!supabase) {
@@ -114,7 +117,15 @@ export async function signInWithProvider(provider: "google" | "apple") {
     throw error;
   }
   if (Platform.OS !== "web" && data.url) {
-    await Linking.openURL(data.url);
+    const browserResult = await WebBrowser.openAuthSessionAsync(
+      data.url,
+      redirectTo,
+    );
+    if (browserResult.type === "success") {
+      await handleAuthCallback(browserResult.url);
+    } else if (browserResult.type === "cancel") {
+      throw new Error(`${providerName} sign-in was cancelled.`);
+    }
   }
   return data;
 }

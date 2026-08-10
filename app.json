@@ -23,7 +23,7 @@
       "predictiveBackGestureEnabled": false
     },
     "androidNavigationBar": {
-      "backgroundColor": "#F8FBE9",
+      "backgroundColor": "#FFFFFF",
       "barStyle": "dark-content"
     },
     "androidStatusBar": {
@@ -40,7 +40,8 @@
           "cameraPermission": "Allow Saturated to take a profile photo."
         }
       ],
-      "expo-sharing"
+      "expo-sharing",
+      "expo-web-browser"
     ],
     "extra": {
       "eas": {
