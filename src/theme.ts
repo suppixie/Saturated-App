@@ -18,7 +18,7 @@ export const F = {
 
 export const FIGMA_FRAME_WIDTH = 441;
 export const FIGMA_FRAME_HEIGHT = 918;
-export const EXPLORE_PAGE_SIZE = 50;
+export const EXPLORE_PAGE_SIZE = 30;
 
 export const glass = {
   backgroundColor: "rgba(4,178,100,.15)",

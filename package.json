@@ -14,6 +14,7 @@
     "expo-dev-client": "~57.0.10",
     "expo-file-system": "~57.0.1",
     "expo-font": "^57.0.1",
+    "expo-image": "~57.0.1",
     "expo-image-picker": "~57.0.5",
     "expo-linear-gradient": "^57.0.1",
     "expo-sharing": "~57.0.10",
@@ -43,7 +44,8 @@
     "web:oauth": "expo start --web --port 3000",
     "catalogue:migration": "node scripts/generate-beverage-migration.mjs",
     "catalogue:images": "powershell -ExecutionPolicy Bypass -File scripts/extract-catalogue-images.ps1",
-    "legal:validate": "node scripts/validate-legal-site.mjs"
+    "legal:validate": "node scripts/validate-legal-site.mjs",
+    "verify": "node scripts/verify-project.mjs"
   },
   "private": true
 }

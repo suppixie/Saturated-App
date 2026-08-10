@@ -11,6 +11,7 @@ import {
   useFonts as useDMSans,
 } from "@expo-google-fonts/dm-sans";
 import { BlurTargetView, BlurView } from "expo-blur";
+import { Image as ExpoImage } from "expo-image";
 import * as ImagePicker from "expo-image-picker";
 import { LinearGradient } from "expo-linear-gradient";
 import * as Sharing from "expo-sharing";
@@ -29,13 +30,13 @@ import {
   Mail,
   MapPin,
   MessageCircle,
-  Plus,
   Scale,
   Search,
   Settings,
   ShieldCheck,
   Share2,
   Star,
+  Trash2,
   UserPlus,
   Users,
   X,
@@ -119,6 +120,7 @@ import {
   DatabaseProfile,
   DatabaseReview,
   createGroupChat,
+  deleteReview,
   deleteCurrentAccount,
   exportCurrentUserData,
   loadBadges,
@@ -158,13 +160,11 @@ import {
 import { isSupabaseConfigured, supabase } from "./lib/supabase";
 import { catalogueImages } from "./src/data/catalogueImages";
 import { newCatalogueBeverages } from "./src/data/newCatalogueBeverages";
-import { starterChatGroups } from "./src/data/chatGroups";
-import {
+import type {
   CreateChatGroupInput,
   GroupChatMember,
   GroupChatRoomMessage,
-  GroupChatsScreen,
-} from "./src/components/GroupChats";
+} from "./src/archived/GroupChats";
 import {
   ModerationQueueContent,
   PasswordResetModal,
@@ -203,6 +203,208 @@ import type {
 const STORAGE_KEY = "saturated-state-v7";
 const rememberedScrollOffsets = new Map<string, number>();
 let exploreBrowseAllSeed = Math.floor(Math.random() * 0xffffffff);
+let exploreSelectedFilter = "All";
+let rememberedSearchQuery = "";
+let rememberedSearchMode: "beverages" | "profiles" = "beverages";
+
+function normalizeSearchText(value: string) {
+  return value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function searchTextMatches(query: string, values: string[]) {
+  const normalizedQuery = normalizeSearchText(query);
+  const searchable = normalizeSearchText(values.join(" "));
+  const queryLetters = normalizedQuery.replace(/[^a-z0-9]/g, "");
+  if (queryLetters.length < 3) return false;
+  const compactQuery = normalizedQuery.replace(/\s+/g, "");
+  const compactSearchable = searchable.replace(/\s+/g, "");
+  const queryWords = normalizedQuery.split(/\s+/).filter(Boolean);
+  return (
+    searchable.includes(normalizedQuery) ||
+    compactSearchable.includes(compactQuery) ||
+    queryWords.every((word) => searchable.includes(word))
+  );
+}
+
+const REGIONAL_DISCOVERY_PROFILES = [
+  {
+    locations: ["dublin", "ireland", "cork", "galway", "limerick"],
+    signals: [
+      "ireland",
+      "irish",
+      "guinness",
+      "jameson",
+      "teeling",
+      "tullamore",
+      "baileys",
+      "club orange",
+      "lyons",
+      "bulmers",
+      "smithwick",
+      "stout",
+      "irish whiskey",
+      "cider",
+    ],
+  },
+  {
+    locations: [
+      "london",
+      "england",
+      "scotland",
+      "wales",
+      "united kingdom",
+      "uk",
+      "britain",
+    ],
+    signals: [
+      "united kingdom",
+      "england",
+      "scotland",
+      "british",
+      "scotch",
+      "gin",
+      "ale",
+      "tea",
+      "cider",
+    ],
+  },
+  {
+    locations: [
+      "new york",
+      "los angeles",
+      "chicago",
+      "usa",
+      "united states",
+      "america",
+    ],
+    signals: [
+      "united states",
+      "american",
+      "bourbon",
+      "root beer",
+      "cola",
+      "budweiser",
+      "jack daniel",
+      "california",
+    ],
+  },
+  {
+    locations: ["mexico", "mexico city", "cancun", "guadalajara"],
+    signals: [
+      "mexico",
+      "mexican",
+      "tequila",
+      "mezcal",
+      "jarritos",
+      "margarita",
+      "tecate",
+    ],
+  },
+  {
+    locations: ["rome", "milan", "italy", "italia", "venice", "florence"],
+    signals: [
+      "italy",
+      "italian",
+      "aperol",
+      "prosecco",
+      "espresso",
+      "limoncello",
+      "amaro",
+      "negroni",
+    ],
+  },
+  {
+    locations: ["paris", "france", "lyon", "bordeaux", "champagne"],
+    signals: [
+      "france",
+      "french",
+      "champagne",
+      "cognac",
+      "bordeaux",
+      "burgundy",
+      "wine",
+    ],
+  },
+  {
+    locations: ["madrid", "barcelona", "spain", "seville", "valencia"],
+    signals: ["spain", "spanish", "sangria", "cava", "rioja", "sherry"],
+  },
+  {
+    locations: ["berlin", "munich", "germany", "hamburg", "frankfurt"],
+    signals: [
+      "germany",
+      "german",
+      "lager",
+      "pilsner",
+      "weissbier",
+      "wheat beer",
+    ],
+  },
+  {
+    locations: ["prague", "czech", "czechia"],
+    signals: ["czech", "pilsner urquell", "pilsner", "lager"],
+  },
+  {
+    locations: ["tokyo", "osaka", "kyoto", "japan"],
+    signals: [
+      "japan",
+      "japanese",
+      "sake",
+      "matcha",
+      "green tea",
+      "ramune",
+      "japanese whisky",
+    ],
+  },
+  {
+    locations: ["delhi", "mumbai", "india", "bangalore", "bengaluru"],
+    signals: ["india", "indian", "chai", "masala", "mango", "kingfisher"],
+  },
+] as const;
+
+function regionalDiscoveryScore(drink: Drink, location: string) {
+  const normalizedLocation = normalizeSearchText(location);
+  if (!normalizedLocation) return 0;
+  const drinkText = normalizeSearchText(
+    [
+      drink.name,
+      drink.brand || "",
+      drink.origin || "",
+      drink.type,
+      drink.description,
+      ...drink.tags,
+    ].join(" "),
+  );
+  const originText = normalizeSearchText(drink.origin || "");
+  const locationWords = normalizedLocation
+    .split(/\s+/)
+    .filter((word) => word.length > 2);
+  const directOriginMatch = locationWords.some((word) =>
+    originText.includes(word),
+  );
+  const regionalProfile = REGIONAL_DISCOVERY_PROFILES.find((profile) =>
+    profile.locations.some((place) => normalizedLocation.includes(place)),
+  );
+  const regionalMatches = regionalProfile
+    ? regionalProfile.signals.filter((signal) => drinkText.includes(signal))
+        .length
+    : 0;
+  let hash = 2166136261;
+  for (const character of `${normalizedLocation}:${drink.id}`) {
+    hash ^= character.charCodeAt(0);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (
+    (directOriginMatch ? 90 : 0) +
+    Math.min(110, regionalMatches * 22) +
+    ((hash >>> 0) % 900) / 100
+  );
+}
 
 function useRememberedScroll(key: string) {
   const ref = useRef<any>(null);
@@ -718,14 +920,12 @@ function Background({
           <View style={s.bgMint} />
           {/* Noise is intentionally hidden; keep the layered colour background. */}
         </BlurTargetView>
-        <TouchableWithoutFeedback accessible={false} onPress={Keyboard.dismiss}>
-          <KeyboardAvoidingView
-            style={[s.backgroundContent, responsiveInsets]}
-            behavior={Platform.OS === "ios" ? "padding" : "height"}
-          >
-            {children}
-          </KeyboardAvoidingView>
-        </TouchableWithoutFeedback>
+        <KeyboardAvoidingView
+          style={[s.backgroundContent, responsiveInsets]}
+          behavior={Platform.OS === "ios" ? "padding" : undefined}
+        >
+          {children}
+        </KeyboardAvoidingView>
       </View>
     </BlurTargetContext.Provider>
   );
@@ -798,7 +998,7 @@ const DrinkCardVisual = memo(function DrinkCardVisual({
       <DrinkCardGlow />
       <View style={s.drinkImageFrame}>
         {!imageFailed && (
-          <Image
+          <ExpoImage
             source={drink.image}
             style={[
               s.drinkImage,
@@ -806,9 +1006,11 @@ const DrinkCardVisual = memo(function DrinkCardVisual({
               isSprite && s.spriteExploreImage,
               isSmallRootBeer && s.rootBeerExploreImage,
             ]}
-            resizeMode="contain"
-            fadeDuration={0}
-            progressiveRenderingEnabled
+            contentFit="contain"
+            cachePolicy="memory-disk"
+            priority="high"
+            recyclingKey={drink.id}
+            transition={0}
             onError={() => setImageFailed(true)}
           />
         )}
@@ -867,10 +1069,16 @@ function ExploreDrinkRail({
         style={s.exploreRailScroller}
         showsHorizontalScrollIndicator={false}
         contentContainerStyle={s.exploreRail}
-        initialNumToRender={4}
-        maxToRenderPerBatch={4}
-        windowSize={3}
-        removeClippedSubviews={Platform.OS === "android"}
+        initialNumToRender={3}
+        maxToRenderPerBatch={3}
+        updateCellsBatchingPeriod={80}
+        windowSize={4}
+        removeClippedSubviews={false}
+        getItemLayout={(_, index) => ({
+          length: 122,
+          offset: 122 * index,
+          index,
+        })}
         renderItem={({ item: drink }) => (
           <Pressable
             accessibilityRole="button"
@@ -1121,7 +1329,7 @@ function BottomNav({
   onGo,
 }: {
   active: string;
-  onGo: (x: Screen) => void;
+  onGo: (x: Screen, fromNavbar?: boolean) => void;
 }) {
   const blurTarget = useContext(BlurTargetContext);
   const androidBlurTarget = blurTarget || EMPTY_BLUR_TARGET;
@@ -1163,7 +1371,7 @@ function BottomNav({
           key={x}
           accessibilityRole="button"
           accessibilityLabel={`Go to ${x}`}
-          onPress={() => onGo(x)}
+          onPress={() => onGo(x, true)}
           hitSlop={6}
           style={[s.navItem, active === x && s.navActive]}
         >
@@ -1224,15 +1432,22 @@ function ResponsiveAppFrame({ children }: { children: React.ReactNode }) {
 
 function ScreenTransition({
   screen,
+  animate,
   children,
 }: {
   screen: Screen;
+  animate: boolean;
   children: React.ReactNode;
 }) {
   const { width } = useWindowDimensions();
-  const translateX = useRef(new Animated.Value(width)).current;
+  const translateX = useRef(new Animated.Value(animate ? width : 0)).current;
 
   useEffect(() => {
+    if (!animate) {
+      translateX.stopAnimation();
+      translateX.setValue(0);
+      return;
+    }
     translateX.setValue(width);
     const animation = Animated.timing(translateX, {
       toValue: 0,
@@ -1242,7 +1457,7 @@ function ScreenTransition({
     });
     animation.start();
     return () => animation.stop();
-  }, [screen, translateX, width]);
+  }, [animate, screen, translateX, width]);
 
   return (
     <Animated.View
@@ -1546,7 +1761,8 @@ function Onboarding({
                   adjustsFontSizeToFit
                   style={s.onboardAge}
                 >
-                  You must be 18+ because we have content about alcohol.
+                  Saturated contains alcohol-related content and is for adults
+                  aged 18+.
                 </Text>
                 <Pressable
                   accessibilityRole="button"
@@ -1636,7 +1852,9 @@ function Onboarding({
                   }}
                   style={s.textButton}
                 >
-                  <Text style={s.textButtonText}>Back to sign in options</Text>
+                  <Text style={[s.textButtonText, s.backToSignInText]}>
+                    Back to sign in options
+                  </Text>
                 </Pressable>
               </ScrollView>
             </KeyboardAvoidingView>
@@ -1738,7 +1956,8 @@ function Onboarding({
               <View style={s.handle} />
               <Text style={s.onboardTitle}>Welcome</Text>
               <Text numberOfLines={1} adjustsFontSizeToFit style={s.onboardAge}>
-                You must be 18+ because we have content about alcohol.
+                Saturated contains alcohol-related content and is for adults
+                aged 18+.
               </Text>
               {birthDateField}
               {accountMode === "social" ? (
@@ -1840,7 +2059,7 @@ function Onboarding({
                     }}
                     style={s.textButton}
                   >
-                    <Text style={s.textButtonText}>
+                    <Text style={[s.textButtonText, s.backToSignInText]}>
                       Back to sign in options
                     </Text>
                   </Pressable>
@@ -2049,16 +2268,23 @@ function Explore({
   currentUserId,
   onOpen,
   onGo,
+  onRefreshData,
 }: {
   items: Drink[];
   reviews: Review[];
   currentUserId?: string;
   onOpen: (d: Drink) => void;
-  onGo: (s: Screen) => void;
+  onGo: (s: Screen, fromNavbar?: boolean) => void;
+  onRefreshData?: () => Promise<void>;
 }) {
-  const [filter, setFilter] = useState("All");
+  const [filter, setFilter] = useState(exploreSelectedFilter);
   const exploreScroll = useRememberedScroll(`explore-${filter}`);
   const [visibleCount, setVisibleCount] = useState(EXPLORE_PAGE_SIZE);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const loadingMoreRef = useRef(false);
+  const loadingMoreTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
   const [browseAllSeed, setBrowseAllSeed] = useState(exploreBrowseAllSeed);
   const [refreshing, setRefreshing] = useState(false);
   const [locationLabel, setLocationLabel] = useState("");
@@ -2146,35 +2372,34 @@ function Explore({
       (preferredTypes.get(drink.type) || 0) * 0.8
     );
   };
-  const byScore = (source: Drink[], scorer: (drink: Drink) => number) =>
-    [...source].sort((a, b) => scorer(b) - scorer(a));
-  const forYou = byScore(
+  const refreshedSelection = (
+    source: Drink[],
+    scorer: (drink: Drink) => number,
+    count = 8,
+  ) => {
+    const candidatePool = [...source]
+      .sort((a, b) => scorer(b) - scorer(a))
+      .slice(0, Math.min(Math.max(count * 3, count), source.length));
+    return candidatePool
+      .sort(
+        (a, b) =>
+          seededDrinkOrderValue(a.id, browseAllSeed) -
+          seededDrinkOrderValue(b.id, browseAllSeed),
+      )
+      .slice(0, count);
+  };
+  const forYou = refreshedSelection(
     items.filter((drink) => !reviewedIds.has(drink.id)),
     recommendationScore,
-  ).slice(0, 8);
-  const locationAffinity = (drink: Drink) => {
-    const location = locationLabel.trim().toLowerCase();
-    if (!location) return 0;
-    const origin = (drink.origin || "").toLowerCase();
-    const locationParts = location
-      .split(/[,\s]+/)
-      .map((part) => part.trim())
-      .filter((part) => part.length > 2);
-    const originMatch = locationParts.some((part) => origin.includes(part));
-    let hash = 2166136261;
-    for (const character of `${location}:${drink.id}`) {
-      hash ^= character.charCodeAt(0);
-      hash = Math.imul(hash, 16777619);
-    }
-    return (originMatch ? 60 : 0) + ((hash >>> 0) % 1000) / 125;
-  };
-  const trending = byScore(
+  );
+  const trending = refreshedSelection(
     items,
     (drink) =>
-      qualityScore(drink) +
-      (communityActivity.get(drink.id) || 0) * 2 +
-      locationAffinity(drink),
-  ).slice(0, 8);
+      qualityScore(drink) * 0.8 +
+      (communityActivity.get(drink.id) || 0) * 1.6 +
+      recommendationScore(drink) * 0.2 +
+      regionalDiscoveryScore(drink, locationLabel),
+  );
   const month = new Date().getMonth();
   const seasonalTags =
     month >= 5 && month <= 7
@@ -2184,14 +2409,21 @@ function Explore({
         : month === 11 || month <= 1
           ? ["warming", "spice", "coffee", "chocolate", "creamy", "rich"]
           : ["floral", "fresh", "citrus", "light", "fruity", "herbal"];
-  const seasonalPicks = byScore(items, (drink) => {
+  const seasonalPicks = refreshedSelection(items, (drink) => {
     const tagText = drink.tags.join(" ").toLowerCase();
     const matches = seasonalTags.filter((tag) => tagText.includes(tag)).length;
     return qualityScore(drink) + matches * 4;
-  }).slice(0, 8);
+  });
   useEffect(() => {
     setVisibleCount(EXPLORE_PAGE_SIZE);
   }, [filter, items]);
+  useEffect(
+    () => () => {
+      if (loadingMoreTimerRef.current)
+        clearTimeout(loadingMoreTimerRef.current);
+    },
+    [],
+  );
   useEffect(() => {
     void AsyncStorage.getItem(DISCOVERY_LOCATION_KEY).then((storedLocation) => {
       if (!storedLocation) return;
@@ -2210,12 +2442,67 @@ function Explore({
     setLocationOpen(false);
   };
   const visibleDrinks = shown.slice(0, visibleCount);
-  const refreshExplore = () => {
+  useEffect(() => {
+    const urls = [
+      ...forYou.slice(0, 3),
+      ...trending.slice(0, 3),
+      ...seasonalPicks.slice(0, 3),
+      ...visibleDrinks.slice(0, 9),
+    ]
+      .map((drink) => {
+        const source = drink.image as { uri?: string } | undefined;
+        return source &&
+          typeof source.uri === "string" &&
+          /^https?:/i.test(source.uri)
+          ? source.uri
+          : undefined;
+      })
+      .filter((uri): uri is string => Boolean(uri));
+    if (urls.length) void ExpoImage.prefetch([...new Set(urls)], "memory-disk");
+  }, [browseAllSeed, filter, items, locationLabel, reviews, visibleCount]);
+  const refreshExplore = async () => {
+    if (loadingMoreTimerRef.current) {
+      clearTimeout(loadingMoreTimerRef.current);
+      loadingMoreTimerRef.current = null;
+    }
+    loadingMoreRef.current = false;
+    setLoadingMore(false);
     setRefreshing(true);
-    exploreBrowseAllSeed = Math.floor(Math.random() * 0xffffffff);
-    setBrowseAllSeed(exploreBrowseAllSeed);
-    setVisibleCount(EXPLORE_PAGE_SIZE);
-    requestAnimationFrame(() => setRefreshing(false));
+    try {
+      await onRefreshData?.();
+      exploreBrowseAllSeed = Math.floor(Math.random() * 0xffffffff);
+      setBrowseAllSeed(exploreBrowseAllSeed);
+      setVisibleCount(EXPLORE_PAGE_SIZE);
+    } finally {
+      setRefreshing(false);
+    }
+  };
+  const loadMoreDrinks = () => {
+    if (loadingMoreRef.current || visibleCount >= shown.length) return;
+    loadingMoreRef.current = true;
+    setLoadingMore(true);
+    const nextBatch = shown.slice(
+      visibleCount,
+      visibleCount + EXPLORE_PAGE_SIZE,
+    );
+    const nextUrls = nextBatch
+      .map((drink) => {
+        const source = drink.image as { uri?: string } | undefined;
+        return source && typeof source.uri === "string"
+          ? source.uri
+          : undefined;
+      })
+      .filter((uri): uri is string => Boolean(uri));
+    if (nextUrls.length)
+      void ExpoImage.prefetch([...new Set(nextUrls)], "memory-disk");
+    loadingMoreTimerRef.current = setTimeout(() => {
+      setVisibleCount((current) =>
+        Math.min(current + EXPLORE_PAGE_SIZE, shown.length),
+      );
+      loadingMoreTimerRef.current = null;
+      loadingMoreRef.current = false;
+      setLoadingMore(false);
+    }, 1500);
   };
   return (
     <Background>
@@ -2251,7 +2538,10 @@ function Explore({
             key={filterOption}
             selected={filter === filterOption}
             color={C.green}
-            onPress={() => setFilter(filterOption)}
+            onPress={() => {
+              exploreSelectedFilter = filterOption;
+              setFilter(filterOption);
+            }}
           >
             {filterOption}
           </Pill>
@@ -2262,6 +2552,8 @@ function Explore({
         onScroll={exploreScroll.onScroll}
         scrollEventThrottle={exploreScroll.scrollEventThrottle}
         showsVerticalScrollIndicator={false}
+        nestedScrollEnabled
+        keyboardDismissMode="on-drag"
         data={visibleDrinks}
         style={s.screenList}
         numColumns={3}
@@ -2269,7 +2561,7 @@ function Explore({
         refreshControl={
           <RefreshControl
             refreshing={refreshing}
-            onRefresh={refreshExplore}
+            onRefresh={() => void refreshExplore()}
             tintColor={C.red}
             colors={[C.red]}
             progressBackgroundColor={C.cream}
@@ -2322,18 +2614,20 @@ function Explore({
           </Pressable>
         )}
         onEndReachedThreshold={0.35}
-        initialNumToRender={12}
-        maxToRenderPerBatch={12}
-        updateCellsBatchingPeriod={45}
-        windowSize={5}
+        initialNumToRender={6}
+        maxToRenderPerBatch={3}
+        updateCellsBatchingPeriod={150}
+        windowSize={4}
         removeClippedSubviews={Platform.OS === "android"}
-        onEndReached={() => {
-          if (visibleCount < shown.length) {
-            setVisibleCount((current) =>
-              Math.min(current + EXPLORE_PAGE_SIZE, shown.length),
-            );
-          }
-        }}
+        ListFooterComponent={
+          loadingMore ? (
+            <View style={s.exploreLoadingMore}>
+              <ActivityIndicator color={C.red} size="small" />
+              <Text style={s.exploreLoadingMoreText}>Loading more drinks…</Text>
+            </View>
+          ) : null
+        }
+        onEndReached={loadMoreDrinks}
       />
       <Modal
         visible={locationOpen}
@@ -2406,22 +2700,26 @@ function SearchScreen({
   onToggle: (id: string) => void;
   onRequest: (name: string) => void;
 }) {
-  const [query, setQuery] = useState("");
-  const [mode, setMode] = useState<"beverages" | "profiles">("beverages");
+  const [query, setQuery] = useState(rememberedSearchQuery);
+  const [mode, setMode] = useState<"beverages" | "profiles">(
+    rememberedSearchMode,
+  );
   const searchScroll = useRememberedScroll(`search-${mode}`);
-  const normalized = query.trim().toLowerCase();
+  const normalized = normalizeSearchText(query);
+  const canSearch = normalized.replace(/[^a-z0-9]/g, "").length >= 3;
   const beverageResults = drinks.filter(
     (drink) =>
-      !!normalized &&
-      (drink.name.toLowerCase().includes(normalized) ||
-        drink.type.toLowerCase().includes(normalized) ||
-        drink.tags.some((tag) => tag.toLowerCase().includes(normalized))),
+      canSearch &&
+      searchTextMatches(query, [
+        drink.name,
+        drink.type,
+        drink.brand || "",
+        ...drink.tags,
+      ]),
   );
   const profileResults = profiles.filter(
     (profile) =>
-      !!normalized &&
-      (profile.name.toLowerCase().includes(normalized) ||
-        profile.handle.toLowerCase().includes(normalized)),
+      canSearch && searchTextMatches(query, [profile.name, profile.handle]),
   );
 
   return (
@@ -2435,7 +2733,10 @@ function SearchScreen({
             key={option}
             accessibilityRole="button"
             accessibilityLabel={`Search ${option}`}
-            onPress={() => setMode(option)}
+            onPress={() => {
+              rememberedSearchMode = option;
+              setMode(option);
+            }}
             style={[
               s.searchModeButton,
               mode === option && s.searchModeButtonActive,
@@ -2457,7 +2758,10 @@ function SearchScreen({
         <TextInput
           autoFocus
           value={query}
-          onChangeText={setQuery}
+          onChangeText={(value) => {
+            rememberedSearchQuery = value;
+            setQuery(value);
+          }}
           placeholder={
             mode === "beverages"
               ? "Search beverages, types or flavours"
@@ -2470,13 +2774,19 @@ function SearchScreen({
           <Pressable
             accessibilityRole="button"
             accessibilityLabel="Clear search"
-            onPress={() => setQuery("")}
+            onPress={() => {
+              rememberedSearchQuery = "";
+              setQuery("");
+            }}
           >
             <X size={19} color={C.teal} />
           </Pressable>
         )}
       </View>
-      {!!normalized && (
+      {!!query.trim() && !canSearch && (
+        <Text style={s.searchCount}>Type at least 3 letters to search.</Text>
+      )}
+      {canSearch && (
         <Text style={s.searchCount}>
           {mode === "beverages"
             ? `${beverageResults.length} ${
@@ -2540,7 +2850,7 @@ function SearchScreen({
             </Pressable>
           )}
           ListEmptyComponent={
-            normalized ? (
+            canSearch ? (
               <View style={s.searchEmptyState}>
                 <Text style={s.emptyTitle}>No beverages found</Text>
                 <Text style={s.emptyPrompt}>Don’t see your drink?</Text>
@@ -2588,7 +2898,7 @@ function SearchScreen({
             </Pressable>
           )}
           ListEmptyComponent={
-            normalized ? (
+            canSearch ? (
               <View style={s.searchEmptyState}>
                 <Text style={s.emptyTitle}>No profiles found</Text>
                 <Text style={s.emptyPrompt}>Try a name or username.</Text>
@@ -2617,10 +2927,7 @@ function RequestDrinkScreen({
   const validName = drinkName.trim();
   return (
     <Background>
-      <KeyboardAvoidingView
-        style={{ flex: 1 }}
-        behavior={Platform.OS === "ios" ? "padding" : undefined}
-      >
+      <View style={{ flex: 1 }}>
         <Heading back onBack={onBack}>
           Request Drink
         </Heading>
@@ -2697,7 +3004,7 @@ function RequestDrinkScreen({
             )}
           </View>
         </ScrollView>
-      </KeyboardAvoidingView>
+      </View>
     </Background>
   );
 }
@@ -2713,7 +3020,7 @@ function Drinklist({
   onRemove: (id: string) => void;
   onOpen: (d: Drink) => void;
   onReview: (d: Drink) => void;
-  onGo: (s: Screen) => void;
+  onGo: (s: Screen, fromNavbar?: boolean) => void;
 }) {
   const drinklistScroll = useRememberedScroll("drinklist");
   const flavourFallbacks: Record<string, string[]> = {
@@ -3458,11 +3765,13 @@ function ReviewScreen({
   existingReview,
   onBack,
   onSubmit,
+  onDelete,
 }: {
   drink: Drink;
   existingReview?: Review;
   onBack: () => void;
   onSubmit: (r: number, t: string, tags: string[]) => Promise<void> | void;
+  onDelete?: () => Promise<void> | void;
 }) {
   const isEditing = Boolean(existingReview);
   const reviewPageScroll = useRememberedScroll(`review-page-${drink.id}`);
@@ -3474,6 +3783,23 @@ function ReviewScreen({
   const [customNote, setCustomNote] = useState("");
   const [addingCustom, setAddingCustom] = useState(false);
   const [keyboardVisible, setKeyboardVisible] = useState(false);
+  const { height: reviewWindowHeight } = useWindowDimensions();
+  const fullReviewWindowHeight = useRef(reviewWindowHeight);
+  const [keyboardHeight, setKeyboardHeight] = useState(0);
+  if (!keyboardVisible) {
+    fullReviewWindowHeight.current = Math.max(
+      fullReviewWindowHeight.current,
+      reviewWindowHeight,
+    );
+  }
+  const reviewWindowShrink = Math.max(
+    0,
+    fullReviewWindowHeight.current - reviewWindowHeight,
+  );
+  const keyboardOverlap =
+    keyboardVisible && reviewWindowShrink < keyboardHeight * 0.5
+      ? keyboardHeight
+      : 0;
   const [availableNotes, setAvailableNotes] = useState(() =>
     Array.from(
       new Set([
@@ -3493,29 +3819,36 @@ function ReviewScreen({
     ),
   );
   useEffect(() => {
-    const shown = Keyboard.addListener("keyboardDidShow", () => {
+    const shown = Keyboard.addListener("keyboardDidShow", (event) => {
       setKeyboardVisible(true);
+      setKeyboardHeight(event.endCoordinates.height);
       if (addingCustom) {
         setTimeout(
           () => reviewScrollRef.current?.scrollToEnd({ animated: true }),
-          80,
+          120,
         );
       }
     });
-    const hidden = Keyboard.addListener("keyboardDidHide", () =>
-      setKeyboardVisible(false),
-    );
+    const hidden = Keyboard.addListener("keyboardDidHide", () => {
+      setKeyboardVisible(false);
+      setKeyboardHeight(0);
+    });
     return () => {
       shown.remove();
       hidden.remove();
     };
   }, [addingCustom]);
+  useEffect(() => {
+    if (!keyboardVisible || !addingCustom) return;
+    const timer = setTimeout(
+      () => reviewScrollRef.current?.scrollToEnd({ animated: true }),
+      80,
+    );
+    return () => clearTimeout(timer);
+  }, [addingCustom, keyboardOverlap, keyboardVisible, reviewScrollRef]);
   return (
     <Background>
-      <KeyboardAvoidingView
-        style={{ flex: 1 }}
-        behavior={Platform.OS === "ios" ? "padding" : undefined}
-      >
+      <View style={{ flex: 1 }}>
         <ScrollView
           ref={reviewScrollRef}
           onScroll={reviewPageScroll.onScroll}
@@ -3523,9 +3856,15 @@ function ReviewScreen({
           showsVerticalScrollIndicator={false}
           style={s.screenScroll}
           keyboardShouldPersistTaps="handled"
+          keyboardDismissMode="on-drag"
+          nestedScrollEnabled
           contentContainerStyle={[
             s.reviewPageContent,
-            keyboardVisible && addingCustom && s.reviewPageContentKeyboard,
+            keyboardVisible &&
+              addingCustom && [
+                s.reviewPageContentKeyboard,
+                { paddingBottom: keyboardOverlap + 12 },
+              ],
           ]}
         >
           <Heading back onBack={onBack}>
@@ -3652,47 +3991,95 @@ function ReviewScreen({
               </View>
             )}
           </View>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel={isEditing ? "Save review" : "Submit review"}
-            style={[s.primary, { margin: 32, height: 46 }]}
-            disabled={saving}
-            onPress={async () => {
-              if (!rating)
-                return Alert.alert(
-                  "Choose a rating",
-                  `Select at least half a star before ${
-                    isEditing ? "saving" : "submitting"
-                  }.`,
-                );
-              if (!text.trim())
-                return Alert.alert(
-                  "Write a review",
-                  `Tell us what you thought before ${
-                    isEditing ? "saving" : "submitting"
-                  }.`,
-                );
-              try {
-                setSaving(true);
-                await onSubmit(rating, text.trim(), tags);
-              } catch (error) {
-                Alert.alert(
-                  "Could not save review",
-                  error instanceof Error ? error.message : "Please try again.",
-                );
-              } finally {
-                setSaving(false);
-              }
-            }}
-          >
-            {saving ? (
-              <ActivityIndicator color="#fff" />
-            ) : (
-              <Text style={s.primaryText}>{isEditing ? "Save" : "Submit"}</Text>
+          <View style={isEditing ? s.reviewEditActions : undefined}>
+            {isEditing && onDelete && (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Delete review"
+                style={s.deleteReviewButton}
+                disabled={saving}
+                onPress={() =>
+                  Alert.alert(
+                    "Delete review?",
+                    "This removes the review from your profile and the drink page.",
+                    [
+                      { text: "Cancel", style: "cancel" },
+                      {
+                        text: "Delete",
+                        style: "destructive",
+                        onPress: async () => {
+                          try {
+                            setSaving(true);
+                            await onDelete();
+                          } catch (error) {
+                            Alert.alert(
+                              "Could not delete review",
+                              error instanceof Error
+                                ? error.message
+                                : "Please try again.",
+                            );
+                          } finally {
+                            setSaving(false);
+                          }
+                        },
+                      },
+                    ],
+                  )
+                }
+              >
+                <Trash2 size={17} color={C.red} />
+                <Text style={s.deleteReviewText}>Delete Review</Text>
+              </Pressable>
             )}
-          </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={isEditing ? "Save review" : "Submit review"}
+              style={[
+                s.primary,
+                isEditing ? s.saveEditedReviewButton : s.submitReviewButton,
+              ]}
+              disabled={saving}
+              onPress={async () => {
+                if (!rating)
+                  return Alert.alert(
+                    "Choose a rating",
+                    `Select at least half a star before ${
+                      isEditing ? "saving" : "submitting"
+                    }.`,
+                  );
+                if (!text.trim())
+                  return Alert.alert(
+                    "Write a review",
+                    `Tell us what you thought before ${
+                      isEditing ? "saving" : "submitting"
+                    }.`,
+                  );
+                try {
+                  setSaving(true);
+                  await onSubmit(rating, text.trim(), tags);
+                } catch (error) {
+                  Alert.alert(
+                    "Could not save review",
+                    error instanceof Error
+                      ? error.message
+                      : "Please try again.",
+                  );
+                } finally {
+                  setSaving(false);
+                }
+              }}
+            >
+              {saving ? (
+                <ActivityIndicator color="#fff" />
+              ) : (
+                <Text style={s.primaryText}>
+                  {isEditing ? "Save" : "Submit"}
+                </Text>
+              )}
+            </Pressable>
+          </View>
         </ScrollView>
-      </KeyboardAvoidingView>
+      </View>
     </Background>
   );
 }
@@ -3932,7 +4319,7 @@ function Profile({
   onToggleBlock?: () => void;
   onReportProfile?: () => void;
   onBack?: () => void;
-  onGo: (s: Screen) => void;
+  onGo: (s: Screen, fromNavbar?: boolean) => void;
   onEditReview: (review: Review) => void;
   onOpenReview: (review: Review) => void;
   onEdit: () => void;
@@ -3960,7 +4347,6 @@ function Profile({
       useNativeDriver: true,
     }).start(() => {
       setSelectedBadgeName(null);
-      badgeSheetTranslateY.setValue(0);
       badgeSheetClosingRef.current = false;
     });
   }, [badgeSheetTranslateY]);
@@ -3988,6 +4374,7 @@ function Profile({
           }).start();
         },
         onPanResponderTerminate: () => {
+          if (badgeSheetClosingRef.current) return;
           Animated.spring(badgeSheetTranslateY, {
             toValue: 0,
             useNativeDriver: true,
@@ -4210,6 +4597,8 @@ function Profile({
         scrollEventThrottle={profileScroll.scrollEventThrottle}
         showsVerticalScrollIndicator={false}
         style={s.screenScroll}
+        nestedScrollEnabled
+        keyboardDismissMode="on-drag"
         contentContainerStyle={s.profilePageContent}
       >
         {isOwn ? (
@@ -5067,7 +5456,6 @@ function Feed({
   onOpenProfile,
   onOpenReview,
   onFollowProfile,
-  onOpenGroups,
 }: {
   drinks: Drink[];
   profiles: SearchProfile[];
@@ -5079,7 +5467,6 @@ function Feed({
   onOpenProfile: (profile: SearchProfile) => void;
   onOpenReview: (review: Review) => void;
   onFollowProfile: (profile: SearchProfile) => void;
-  onOpenGroups: () => void;
 }) {
   const [showAll, setShowAll] = useState(false);
   const feedScroll = useRememberedScroll("feed");
@@ -5144,17 +5531,6 @@ function Feed({
           <Heading back onBack={onBack}>
             Feed
           </Heading>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="Open group chats"
-            onPress={onOpenGroups}
-            style={s.feedGroupChatButton}
-          >
-            <MessageCircle size={24} color={C.red} />
-            <View style={s.feedGroupChatPlus}>
-              <Plus size={13} strokeWidth={3} color={C.red} />
-            </View>
-          </Pressable>
         </View>
         <View style={s.feedSectionHeader}>
           <Text style={s.cardTitle}>Your friends are drinking..</Text>
@@ -5346,7 +5722,12 @@ export default function App() {
     DMSansBold: DMSans_700Bold,
   });
   const [bold] = useBoldonse({ Boldonse: Boldonse_400Regular });
-  const [screen, setScreen] = useState<Screen>("splash");
+  const [screen, setScreenState] = useState<Screen>("splash");
+  const [slideNavigation, setSlideNavigation] = useState(false);
+  const setScreen = useCallback((nextScreen: Screen) => {
+    setSlideNavigation(false);
+    setScreenState(nextScreen);
+  }, []);
   const [onboard, setOnboard] = useState(false);
   const [session, setSession] = useState<Session | null>(null);
   const [currentProfile, setCurrentProfile] = useState<DatabaseProfile | null>(
@@ -5381,7 +5762,7 @@ export default function App() {
   const [selectedProfile, setSelectedProfile] = useState(searchableProfiles[1]);
   const [profileReturn, setProfileReturn] = useState<Screen>("search");
   const [followedProfiles, setFollowedProfiles] = useState<string[]>([]);
-  const [chatGroups, setChatGroups] = useState<ChatGroup[]>(starterChatGroups);
+  const [chatGroups, setChatGroups] = useState<ChatGroup[]>([]);
   const [pendingGroupInvite, setPendingGroupInvite] = useState<string>();
   const [blockedProfiles, setBlockedProfiles] = useState<string[]>([]);
   const [reportTarget, setReportTarget] = useState<ReportTarget | null>(null);
@@ -5573,27 +5954,7 @@ export default function App() {
         .map((request) => String(request.drink_name || ""))
         .filter(Boolean),
     );
-    try {
-      const groupRows = await loadGroupChats();
-      setChatGroups(
-        groupRows.length
-          ? groupRows.map(chatGroupFromDatabase)
-          : starterChatGroups,
-      );
-    } catch {
-      // The local directory stays usable until the group-chat migration is live.
-    }
   };
-
-  useEffect(() => {
-    AsyncStorage.getItem(CHAT_GROUPS_STORAGE_KEY)
-      .then((raw) => {
-        if (!raw) return;
-        const stored = JSON.parse(raw) as ChatGroup[];
-        if (Array.isArray(stored) && stored.length) setChatGroups(stored);
-      })
-      .catch(() => undefined);
-  }, []);
 
   useEffect(() => {
     if (!supabase) {
@@ -5658,7 +6019,7 @@ export default function App() {
           const groupRows = await loadGroupChats();
           setChatGroups(groupRows.map(chatGroupFromDatabase));
           await AsyncStorage.removeItem(PENDING_GROUP_INVITE_KEY);
-          setScreen("groups");
+          setScreen("feed");
         } catch (error) {
           Alert.alert(
             "Could not join group",
@@ -5696,7 +6057,7 @@ export default function App() {
             setChatGroups(groupRows.map(chatGroupFromDatabase));
             setPendingGroupInvite(undefined);
             await AsyncStorage.removeItem(PENDING_GROUP_INVITE_KEY);
-            setScreen("groups");
+            setScreen("feed");
           } catch (error) {
             Alert.alert(
               "Could not join group",
@@ -5781,10 +6142,11 @@ export default function App() {
   const appProfiles = (
     databaseProfiles.length ? databaseProfiles : searchableProfiles
   ).filter((profile) => !blockedProfiles.includes(profile.id));
-  const go = (nextScreen: Screen) => {
+  const go = (nextScreen: Screen, fromNavbar = false) => {
     if (nextScreen === "search") setSearchReturn(screen);
     if (nextScreen === "profile") setBadgeTab(false);
-    setScreen(nextScreen);
+    setSlideNavigation(fromNavbar);
+    setScreenState(nextScreen);
   };
   useEffect(() => {
     if (Platform.OS !== "android") return;
@@ -6263,6 +6625,7 @@ export default function App() {
         currentUserId={session?.user.id}
         onOpen={open}
         onGo={go}
+        onRefreshData={() => refreshDatabaseState(session)}
       />
     );
   else if (screen === "search")
@@ -6413,6 +6776,23 @@ export default function App() {
           setEditingReviewId(null);
           setScreen(editingReviewId ? reviewReturn : "drink");
         }}
+        onDelete={
+          reviewBeingEdited
+            ? async () => {
+                await deleteReview(reviewBeingEdited.id);
+                setReviews((current) =>
+                  current.filter((item) => item.id !== reviewBeingEdited.id),
+                );
+                setCommentThreads((current) => {
+                  const next = { ...current };
+                  delete next[reviewBeingEdited.id];
+                  return next;
+                });
+                setEditingReviewId(null);
+                setScreen(reviewReturn);
+              }
+            : undefined
+        }
       />
     );
   else if (screen === "profile")
@@ -6614,7 +6994,7 @@ export default function App() {
         onResolve={(report, action) => void moderateReport(report, action)}
       />
     );
-  else if (screen === "feed")
+  else if (screen === "feed" || screen === "groups")
     body = (
       <Feed
         drinks={appDrinks}
@@ -6627,28 +7007,7 @@ export default function App() {
         onOpenProfile={openProfile}
         onOpenReview={openReview}
         onFollowProfile={(profile) => void followProfile(profile.id)}
-        onOpenGroups={() => setScreen("groups")}
       />
-    );
-  else
-    body = (
-      <Background>
-        <GroupChatsScreen
-          groups={chatGroups}
-          currentUserId={session?.user.id}
-          onBack={() => setScreen("feed")}
-          onCreate={createChatGroup}
-          onJoin={joinChatGroup}
-          onLeave={leaveChatGroup}
-          onReport={reportChatGroup}
-          onLoadMembers={loadChatMembers}
-          onLoadMessages={loadChatMessages}
-          onSendMessage={sendChatMessage}
-          renderGlass={(radius = 22, intensity = 38) => (
-            <GlassLayers radius={radius} intensity={intensity} />
-          )}
-        />
-      </Background>
     );
   return (
     <SafeAreaProvider>
@@ -6656,6 +7015,7 @@ export default function App() {
         <ScreenTransition
           key={isOAuthConsentRoute ? "oauth-consent" : screen}
           screen={screen}
+          animate={slideNavigation}
         >
           {body}
         </ScreenTransition>

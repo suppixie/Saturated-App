@@ -476,6 +476,20 @@ const s = StyleSheet.create({
     marginTop: -5,
     marginBottom: -5,
   },
+  exploreLoadingMore: {
+    width: 374,
+    minHeight: 72,
+    alignItems: "center",
+    justifyContent: "center",
+    flexDirection: "row",
+    gap: 9,
+    paddingBottom: 20,
+  },
+  exploreLoadingMoreText: {
+    fontFamily: F.medium,
+    fontSize: 12,
+    color: C.teal,
+  },
   gridRow: {
     width: 374,
     gap: 22,
@@ -1097,7 +1111,39 @@ const s = StyleSheet.create({
     paddingBottom: 36,
   },
   reviewPageContentKeyboard: {
-    paddingBottom: 260,
+    paddingBottom: 12,
+  },
+  reviewEditActions: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    marginHorizontal: 32,
+    marginVertical: 32,
+  },
+  deleteReviewButton: {
+    flex: 1,
+    height: 46,
+    borderRadius: 23,
+    borderWidth: 1,
+    borderColor: C.red,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+    backgroundColor: "rgba(255,254,248,.88)",
+  },
+  deleteReviewText: {
+    fontFamily: F.bold,
+    fontSize: 11,
+    color: C.red,
+  },
+  saveEditedReviewButton: {
+    flex: 1,
+    height: 46,
+  },
+  submitReviewButton: {
+    margin: 32,
+    height: 46,
   },
   reviewDrink: {
     height: 99,
@@ -1715,14 +1761,14 @@ const s = StyleSheet.create({
     ...(Platform.OS === "android"
       ? {
           boxShadow:
-            "-5px 5px 9px rgba(0,0,0,0.16), 5px 5px 9px rgba(0,0,0,0.16), 0px 8px 10px rgba(0,0,0,0.14)",
+            "-2px 3px 5px rgba(0,0,0,0.07), 2px 3px 5px rgba(0,0,0,0.07), 0px 5px 7px rgba(0,0,0,0.06)",
         }
       : {
           shadowColor: "#000",
-          shadowOpacity: 0.2,
-          shadowRadius: 7,
-          shadowOffset: { width: 0, height: 6 },
-          elevation: 9,
+          shadowOpacity: 0.1,
+          shadowRadius: 5,
+          shadowOffset: { width: 0, height: 3 },
+          elevation: 4,
         }),
   },
   receipt: {
@@ -1985,24 +2031,7 @@ const s = StyleSheet.create({
   feedContent: { paddingBottom: 80 },
   feedHeadingWrap: {
     position: "relative",
-  },
-  feedGroupChatButton: {
-    position: "absolute",
-    right: 32,
-    top: 22,
-    width: 34,
-    height: 40,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  feedGroupChatPlus: {
-    position: "absolute",
-    right: 0,
-    top: 1,
-    width: 14,
-    height: 14,
-    alignItems: "center",
-    justifyContent: "center",
+    transform: [{ translateY: -2 }],
   },
   feedSectionHeader: {
     marginHorizontal: 32,
@@ -2607,6 +2636,7 @@ const s = StyleSheet.create({
     justifyContent: "center",
   },
   textButtonText: { fontFamily: F.medium, fontSize: 11, color: C.teal },
+  backToSignInText: { textDecorationLine: "underline" },
   input: {
     width: "100%",
     height: 44,

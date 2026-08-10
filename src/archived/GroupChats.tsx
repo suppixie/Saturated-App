@@ -18,12 +18,12 @@ import {
   Users,
   X,
 } from "lucide-react-native";
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
   Image,
-  KeyboardAvoidingView,
+  Keyboard,
   Modal,
   Platform,
   Pressable,
@@ -34,7 +34,7 @@ import {
   View,
 } from "react-native";
 
-import { C, F, glass } from "../theme";
+import { C, F, FIGMA_FRAME_WIDTH, glass } from "../theme";
 import type { ChatGroup, ChatGroupVisibility } from "../types";
 
 export type GroupChatRoomMessage = {
@@ -208,9 +208,56 @@ export function GroupChatsScreen({
   const [messageVersion, setMessageVersion] = useState(0);
   const [messageLoading, setMessageLoading] = useState(false);
   const [roomMenuOpen, setRoomMenuOpen] = useState(false);
+  const [leaveConfirmVisible, setLeaveConfirmVisible] = useState(false);
+  const [leavingGroup, setLeavingGroup] = useState(false);
   const [membersOpen, setMembersOpen] = useState(false);
   const [membersLoading, setMembersLoading] = useState(false);
   const [members, setMembers] = useState<GroupChatMember[]>([]);
+  const messagesScrollRef = useRef<ScrollView | null>(null);
+  const composerRef = useRef<View | null>(null);
+  const keyboardTopRef = useRef<number | null>(null);
+  const composerLiftRef = useRef(0);
+  const [composerLift, setComposerLift] = useState(0);
+
+  const measureComposerLift = (keyboardTop = keyboardTopRef.current) => {
+    if (!keyboardTop) return;
+    requestAnimationFrame(() => {
+      composerRef.current?.measureInWindow((_x, y, width, height) => {
+        const renderScale = Math.max(0.1, width / FIGMA_FRAME_WIDTH);
+        const baselineBottom =
+          y + height + composerLiftRef.current * renderScale;
+        const nextLift = Math.max(
+          0,
+          (baselineBottom - keyboardTop + 5) / renderScale,
+        );
+        composerLiftRef.current = nextLift;
+        setComposerLift((current) =>
+          Math.abs(current - nextLift) < 0.5 ? current : nextLift,
+        );
+      });
+    });
+  };
+
+  useEffect(() => {
+    const shown = Keyboard.addListener("keyboardDidShow", (event) => {
+      keyboardTopRef.current = event.endCoordinates.screenY;
+      [40, 160, 320].forEach((delay) =>
+        setTimeout(() => {
+          measureComposerLift(event.endCoordinates.screenY);
+          messagesScrollRef.current?.scrollToEnd({ animated: true });
+        }, delay),
+      );
+    });
+    const hidden = Keyboard.addListener("keyboardDidHide", () => {
+      keyboardTopRef.current = null;
+      composerLiftRef.current = 0;
+      setComposerLift(0);
+    });
+    return () => {
+      shown.remove();
+      hidden.remove();
+    };
+  }, []);
 
   const visibleGroups = useMemo(
     () =>
@@ -385,32 +432,27 @@ export function GroupChatsScreen({
   const leaveActiveGroup = () => {
     if (!activeGroup) return;
     setRoomMenuOpen(false);
-    Alert.alert(
-      "Leave this group?",
-      `You will need to join ${activeGroup.name} again to send messages.`,
-      [
-        { text: "Cancel", style: "cancel" },
-        {
-          text: "Leave",
-          style: "destructive",
-          onPress: () => {
-            void Promise.resolve(onLeave?.(activeGroup))
-              .then(() => {
-                setLocallyJoinedIds((current) =>
-                  current.filter((id) => id !== activeGroup.id),
-                );
-                setActiveGroupId(undefined);
-              })
-              .catch((error) =>
-                Alert.alert(
-                  "Could not leave group",
-                  error instanceof Error ? error.message : "Please try again.",
-                ),
-              );
-          },
-        },
-      ],
-    );
+    setLeaveConfirmVisible(true);
+  };
+
+  const confirmLeaveActiveGroup = async () => {
+    if (!activeGroup || leavingGroup) return;
+    try {
+      setLeavingGroup(true);
+      await Promise.resolve(onLeave?.(activeGroup));
+      setLocallyJoinedIds((current) =>
+        current.filter((id) => id !== activeGroup.id),
+      );
+      setLeaveConfirmVisible(false);
+      setActiveGroupId(undefined);
+    } catch (error) {
+      Alert.alert(
+        "Could not leave group",
+        error instanceof Error ? error.message : "Please try again.",
+      );
+    } finally {
+      setLeavingGroup(false);
+    }
   };
 
   const reportActiveGroup = () => {
@@ -443,10 +485,7 @@ export function GroupChatsScreen({
 
   if (activeGroup) {
     return (
-      <KeyboardAvoidingView
-        style={styles.roomScreen}
-        behavior={Platform.OS === "ios" ? "padding" : undefined}
-      >
+      <View style={styles.roomScreen}>
         <View style={styles.roomHeader}>
           <Pressable
             accessibilityRole="button"
@@ -509,10 +548,12 @@ export function GroupChatsScreen({
           )}
         </View>
         <ScrollView
+          ref={messagesScrollRef}
           key={`${activeGroup.id}-${messageVersion}`}
           showsVerticalScrollIndicator={false}
           keyboardDismissMode="on-drag"
           keyboardShouldPersistTaps="handled"
+          style={styles.messagesScroller}
           contentContainerStyle={styles.messages}
         >
           {messageLoading && <ActivityIndicator color={C.red} />}
@@ -562,7 +603,14 @@ export function GroupChatsScreen({
           ))}
         </ScrollView>
         {activeGroupJoined ? (
-          <View style={styles.composer}>
+          <View
+            ref={composerRef}
+            onLayout={() => measureComposerLift()}
+            style={[
+              styles.composer,
+              composerLift > 0 && { marginBottom: composerLift },
+            ]}
+          >
             <TextInput
               value={messageDraft}
               onChangeText={setMessageDraft}
@@ -570,6 +618,14 @@ export function GroupChatsScreen({
               placeholder="Write a message…"
               placeholderTextColor="rgba(32,26,27,.48)"
               returnKeyType="send"
+              onFocus={() => {
+                [80, Platform.OS === "android" ? 240 : 140].forEach((delay) =>
+                  setTimeout(() => {
+                    measureComposerLift();
+                    messagesScrollRef.current?.scrollToEnd({ animated: true });
+                  }, delay),
+                );
+              }}
               style={styles.composerInput}
             />
             <Pressable
@@ -670,7 +726,49 @@ export function GroupChatsScreen({
             </Pressable>
           </Pressable>
         </Modal>
-      </KeyboardAvoidingView>
+        <Modal
+          visible={leaveConfirmVisible}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setLeaveConfirmVisible(false)}
+        >
+          <View style={styles.confirmOverlay}>
+            <View style={styles.leaveConfirmCard}>
+              <Text style={styles.leaveConfirmTitle}>Leave group?</Text>
+              <Text style={styles.leaveConfirmCopy}>
+                You will need to join {activeGroup.name} again to send messages.
+              </Text>
+              <View style={styles.leaveConfirmActions}>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Cancel leaving group"
+                  disabled={leavingGroup}
+                  onPress={() => setLeaveConfirmVisible(false)}
+                  style={styles.leaveCancelButton}
+                >
+                  <Text style={styles.leaveCancelText}>Cancel</Text>
+                </Pressable>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Confirm leaving group"
+                  disabled={leavingGroup}
+                  onPress={() => void confirmLeaveActiveGroup()}
+                  style={styles.leaveConfirmButton}
+                >
+                  {leavingGroup ? (
+                    <ActivityIndicator color={C.cream} />
+                  ) : (
+                    <>
+                      <LogOut size={16} color={C.cream} />
+                      <Text style={styles.leaveConfirmButtonText}>Leave</Text>
+                    </>
+                  )}
+                </Pressable>
+              </View>
+            </View>
+          </View>
+        </Modal>
+      </View>
     );
   }
 
@@ -1366,6 +1464,10 @@ const styles = StyleSheet.create({
     gap: 9,
     backgroundColor: "rgba(255,254,248,.92)",
   },
+  messagesScroller: {
+    flex: 1,
+    minHeight: 0,
+  },
   composerInput: {
     flex: 1,
     minHeight: 46,
@@ -1401,6 +1503,71 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     backgroundColor: "rgba(32,26,27,.26)",
+  },
+  confirmOverlay: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 32,
+    backgroundColor: "rgba(32,26,27,.38)",
+  },
+  leaveConfirmCard: {
+    width: "100%",
+    maxWidth: 360,
+    borderRadius: 24,
+    padding: 24,
+    backgroundColor: C.cream,
+    borderWidth: 1,
+    borderColor: "rgba(43,73,89,.14)",
+    shadowColor: "#000",
+    shadowOpacity: 0.2,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 8,
+  },
+  leaveConfirmTitle: {
+    fontFamily: F.display,
+    fontSize: 20,
+    color: C.red,
+    textAlign: "center",
+  },
+  leaveConfirmCopy: {
+    marginTop: 10,
+    fontFamily: F.regular,
+    fontSize: 13,
+    color: C.ink,
+    textAlign: "center",
+  },
+  leaveConfirmActions: {
+    marginTop: 22,
+    flexDirection: "row",
+    gap: 10,
+  },
+  leaveCancelButton: {
+    flex: 1,
+    height: 44,
+    borderRadius: 22,
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 1,
+    borderColor: "rgba(43,73,89,.28)",
+    backgroundColor: "rgba(255,255,255,.72)",
+  },
+  leaveCancelText: { fontFamily: F.bold, fontSize: 12, color: C.teal },
+  leaveConfirmButton: {
+    flex: 1,
+    height: 44,
+    borderRadius: 22,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 7,
+    backgroundColor: C.red,
+  },
+  leaveConfirmButtonText: {
+    fontFamily: F.bold,
+    fontSize: 12,
+    color: C.cream,
   },
   membersCard: {
     width: "100%",
