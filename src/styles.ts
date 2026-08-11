@@ -725,6 +725,40 @@ const s = StyleSheet.create({
     color: "#fff",
     textShadowColor: "rgba(0,0,0,.24)",
   },
+  reviewAddedToast: {
+    position: "absolute",
+    left: 32,
+    right: 32,
+    bottom: 24,
+    zIndex: 80,
+    borderRadius: 18,
+    backgroundColor: C.teal,
+    ...(Platform.OS === "android"
+      ? { boxShadow: "0px 3px 5px rgba(0,0,0,.22)" }
+      : {
+          shadowColor: "#000",
+          shadowOpacity: 0.2,
+          shadowRadius: 5,
+          shadowOffset: { width: 0, height: 3 },
+          elevation: 6,
+        }),
+  },
+  reviewAddedToastButton: {
+    minHeight: 40,
+    paddingHorizontal: 16,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  reviewAddedToastText: {
+    fontFamily: F.regular,
+    fontSize: 12,
+    color: "#fff",
+    textAlign: "center",
+  },
+  reviewAddedToastLink: {
+    fontFamily: F.bold,
+    textDecorationLine: "underline",
+  },
   listCard: {
     height: 110,
     borderRadius: 23,

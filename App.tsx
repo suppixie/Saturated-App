@@ -1417,6 +1417,53 @@ function BottomNav({
   );
 }
 
+function ReviewAddedToast({
+  visible,
+  onOpenProfile,
+}: {
+  visible: boolean;
+  onOpenProfile: () => void;
+}) {
+  const opacity = useRef(new Animated.Value(0)).current;
+  const translateY = useRef(new Animated.Value(12)).current;
+
+  useEffect(() => {
+    Animated.parallel([
+      Animated.timing(opacity, {
+        toValue: visible ? 1 : 0,
+        duration: visible ? 180 : 150,
+        useNativeDriver: true,
+      }),
+      Animated.timing(translateY, {
+        toValue: visible ? 0 : 12,
+        duration: visible ? 180 : 150,
+        useNativeDriver: true,
+      }),
+    ]).start();
+  }, [opacity, translateY, visible]);
+
+  return (
+    <Animated.View
+      pointerEvents={visible ? "auto" : "none"}
+      style={[
+        s.reviewAddedToast,
+        { opacity, transform: [{ translateY }] },
+      ]}
+    >
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel="Review added. View it on your Profile"
+        onPress={onOpenProfile}
+        style={s.reviewAddedToastButton}
+      >
+        <Text numberOfLines={1} style={s.reviewAddedToastText}>
+          Review added! <Text style={s.reviewAddedToastLink}>View it on your Profile</Text>
+        </Text>
+      </Pressable>
+    </Animated.View>
+  );
+}
+
 function ResponsiveAppFrame({ children }: { children: React.ReactNode }) {
   const { width, height } = useWindowDimensions();
   const insets = useSafeAreaInsets();
@@ -3228,7 +3275,7 @@ function Drinklist({
             onPress={() => onGo("search")}
             style={s.headerIcon}
           >
-            <Search color={C.red} size={25} />
+            <Search color={C.red} size={26} />
           </Pressable>
         </View>
       </View>
@@ -3323,6 +3370,7 @@ function ReviewCard({
   onLike,
   onReport,
   onOpen,
+  onOpenComment,
   onOpenProfile,
 }: {
   review: Review;
@@ -3330,6 +3378,7 @@ function ReviewCard({
   onLike: (id: string) => void;
   onReport?: (review: Review) => void;
   onOpen: (review: Review) => void;
+  onOpenComment: (review: Review) => void;
   onOpenProfile: (user: string) => void;
 }) {
   return (
@@ -3410,7 +3459,7 @@ function ReviewCard({
               accessibilityLabel={`Open ${review.comments} comments`}
               onPress={(event) => {
                 event.stopPropagation();
-                onOpen(review);
+                onOpenComment(review);
               }}
               style={s.reviewMetricButton}
             >
@@ -3449,6 +3498,7 @@ function ReviewDetailScreen({
   drink,
   liked,
   comments,
+  focusComment,
   onBack,
   onLike,
   onAddComment,
@@ -3464,6 +3514,7 @@ function ReviewDetailScreen({
   drink: Drink;
   liked: boolean;
   comments: ReviewComment[];
+  focusComment?: boolean;
   onBack: () => void;
   onLike: () => void;
   onAddComment: (text: string) => void;
@@ -3476,6 +3527,7 @@ function ReviewDetailScreen({
   onDeleteReview: () => Promise<void>;
 }) {
   const [comment, setComment] = useState("");
+  const commentInputRef = useRef<TextInput>(null);
   const [reviewMenuOpen, setReviewMenuOpen] = useState(false);
   const [deleteReviewVisible, setDeleteReviewVisible] = useState(false);
   const [deletingReview, setDeletingReview] = useState(false);
@@ -3528,6 +3580,17 @@ function ReviewDetailScreen({
       hidden.remove();
     };
   }, [commentScrollRef]);
+  useEffect(() => {
+    if (!focusComment) return;
+    const focusTimer = setTimeout(() => {
+      commentInputRef.current?.focus();
+      setTimeout(
+        () => commentScrollRef.current?.scrollToEnd({ animated: true }),
+        120,
+      );
+    }, 280);
+    return () => clearTimeout(focusTimer);
+  }, [commentScrollRef, focusComment, review.id]);
   return (
     <Background>
       <Heading back onBack={onBack}>
@@ -3748,6 +3811,7 @@ function ReviewDetailScreen({
           ]}
         >
           <TextInput
+            ref={commentInputRef}
             value={comment}
             onChangeText={setComment}
             onFocus={() =>
@@ -3880,7 +3944,7 @@ function DrinkProfile({
   onLike: (id: string) => void;
   onReportReview: (review: Review) => void;
   likedReviewIds: string[];
-  onOpenReview: (review: Review) => void;
+  onOpenReview: (review: Review, focusComment?: boolean) => void;
   onOpenProfile: (user: string) => void;
   onOpenDrink: (drink: Drink) => void;
 }) {
@@ -4154,6 +4218,9 @@ function DrinkProfile({
             onLike={onLike}
             onReport={onReportReview}
             onOpen={onOpenReview}
+            onOpenComment={(reviewToComment) =>
+              onOpenReview(reviewToComment, true)
+            }
             onOpenProfile={onOpenProfile}
           />
         ))}
@@ -6355,6 +6422,9 @@ export default function App() {
   const [selectedReviewId, setSelectedReviewId] = useState(
     initialReviews[0].id,
   );
+  const [reviewDetailFocusComment, setReviewDetailFocusComment] = useState(false);
+  const [reviewAddedToastVisible, setReviewAddedToastVisible] = useState(false);
+  const reviewAddedToastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [editingReviewId, setEditingReviewId] = useState<string | null>(null);
   const [reviewReturn, setReviewReturn] = useState<Screen>("drink");
   const [reviewDetailReturn, setReviewDetailReturn] = useState<Screen>("drink");
@@ -6387,6 +6457,24 @@ export default function App() {
   const [onboarded, setOnboarded] = useState(false);
   const [ready, setReady] = useState(false);
   const [minimumSplashElapsed, setMinimumSplashElapsed] = useState(false);
+  const showReviewAddedToast = useCallback(() => {
+    if (reviewAddedToastTimer.current) {
+      clearTimeout(reviewAddedToastTimer.current);
+    }
+    setReviewAddedToastVisible(true);
+    reviewAddedToastTimer.current = setTimeout(() => {
+      setReviewAddedToastVisible(false);
+      reviewAddedToastTimer.current = null;
+    }, 3000);
+  }, []);
+  useEffect(
+    () => () => {
+      if (reviewAddedToastTimer.current) {
+        clearTimeout(reviewAddedToastTimer.current);
+      }
+    },
+    [],
+  );
   const isOAuthConsentRoute =
     Platform.OS === "web" &&
     typeof window !== "undefined" &&
@@ -7001,8 +7089,9 @@ export default function App() {
     setEditingReviewId(null);
     setScreen(returnScreen);
   };
-  const openReview = (reviewToOpen: Review) => {
+  const openReview = (reviewToOpen: Review, focusComment = false) => {
     setReviewDetailReturn(screen);
+    setReviewDetailFocusComment(focusComment);
     setSelectedReviewId(reviewToOpen.id);
     setSelected(
       appDrinks.find((drink) => drink.id === reviewToOpen.drinkId) ||
@@ -7535,7 +7624,11 @@ export default function App() {
         }
         liked={likedReviews.includes(selectedReview.id)}
         comments={commentThreads[selectedReview.id] || []}
-        onBack={() => setScreen(reviewDetailReturn)}
+        focusComment={reviewDetailFocusComment}
+        onBack={() => {
+          setReviewDetailFocusComment(false);
+          setScreen(reviewDetailReturn);
+        }}
         onLike={() => void like(selectedReview.id)}
         onAddComment={(text) => void addComment(selectedReview.id, text)}
         onReportReview={(reviewToReport) =>
@@ -7576,6 +7669,7 @@ export default function App() {
           setScreen(reviewReturn);
         }}
         onSubmit={async (rating, text, tags) => {
+          const wasEditing = Boolean(editingReviewId);
           if (!session) {
             requireAccount();
             return;
@@ -7587,7 +7681,7 @@ export default function App() {
             tags,
           });
           void trackEvent("review_submitted", {
-            editing: Boolean(editingReviewId),
+            editing: wasEditing,
             rating,
             drink_type: selected.type,
           });
@@ -7613,7 +7707,8 @@ export default function App() {
           setSaved(drinklistIds);
           setBadges(badgeRows);
           setEditingReviewId(null);
-          setScreen(editingReviewId ? reviewReturn : "drink");
+          setScreen(wasEditing ? reviewReturn : "drink");
+          if (!wasEditing) showReviewAddedToast();
         }}
         onDelete={
           reviewBeingEdited
@@ -7835,6 +7930,18 @@ export default function App() {
         >
           {!minimumSplashElapsed && !isOAuthConsentRoute ? <Splash /> : body}
         </ScreenTransition>
+        <ReviewAddedToast
+          visible={reviewAddedToastVisible}
+          onOpenProfile={() => {
+            if (reviewAddedToastTimer.current) {
+              clearTimeout(reviewAddedToastTimer.current);
+              reviewAddedToastTimer.current = null;
+            }
+            setReviewAddedToastVisible(false);
+            setBadgeTab(false);
+            setScreen("profile");
+          }}
+        />
       </ResponsiveAppFrame>
       <Onboarding
         visible={onboard && minimumSplashElapsed}
