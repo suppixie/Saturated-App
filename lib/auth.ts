@@ -1,4 +1,5 @@
 import type { OAuthAuthorizationDetails } from "@supabase/supabase-js";
+import Constants from "expo-constants";
 import * as WebBrowser from "expo-web-browser";
 import { Platform } from "react-native";
 
@@ -16,11 +17,15 @@ function requireSupabase() {
 }
 
 function getRedirectUrl() {
-  const configuredRedirect = process.env.EXPO_PUBLIC_AUTH_REDIRECT_URL;
-  if (configuredRedirect) return configuredRedirect;
   if (Platform.OS === "web" && typeof window !== "undefined") {
     return `${window.location.origin}/auth/callback`;
   }
+  const expoGoUri = Constants.linkingUri?.replace(/\/+$/, "");
+  if (__DEV__ && expoGoUri?.startsWith("exp://")) {
+    return `${expoGoUri}/--/auth/callback`;
+  }
+  const configuredRedirect = process.env.EXPO_PUBLIC_AUTH_REDIRECT_URL;
+  if (configuredRedirect) return configuredRedirect;
   return "saturated://auth/callback";
 }
 

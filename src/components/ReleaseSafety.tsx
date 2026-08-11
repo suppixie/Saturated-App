@@ -575,7 +575,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
-  checkboxChecked: { backgroundColor: C.green, borderColor: C.green },
+  checkboxChecked: { backgroundColor: C.greenDark, borderColor: C.greenDark },
   acceptText: {
     flex: 1,
     fontFamily: F.medium,

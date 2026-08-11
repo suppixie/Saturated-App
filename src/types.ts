@@ -13,6 +13,7 @@ export type Drink = {
   origin?: string;
   brand?: string;
   createdAt?: string;
+  lifecycleStatus?: "active" | "discontinued";
 };
 
 export type Review = {
@@ -20,6 +21,7 @@ export type Review = {
   drinkId: string;
   userId?: string;
   user: string;
+  username?: string;
   avatar?: ImageSourcePropType;
   rating: number;
   text: string;
@@ -74,6 +76,8 @@ export type Screen =
   | "userProfile"
   | "settings"
   | "moderation"
+  | "catalogueAdmin"
+  | "notifications"
   | "review"
   | "reviewDetail"
   | "feed"

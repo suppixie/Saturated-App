@@ -4,6 +4,7 @@ export const C = {
   red: "#cc242c",
   teal: "#2b4959",
   green: "#04b264",
+  greenDark: "#087647",
   ink: "#201a1b",
   cream: "#fffef8",
   gold: "#ffd700",

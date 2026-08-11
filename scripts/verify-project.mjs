@@ -26,6 +26,7 @@ const runNode = (args, label) => {
 
 runNode(["node_modules/typescript/bin/tsc", "--noEmit"], "TypeScript compiles");
 runNode(["scripts/validate-legal-site.mjs"], "Legal pages are configured");
+runNode(["scripts/check-accessibility.mjs"], "Accessibility static checks pass");
 
 const beverages = JSON.parse(
   readFileSync(resolve(root, "data/beverages.json"), "utf8"),
@@ -68,12 +69,12 @@ const migrationVersions = migrationNames.map((name) => name.split("_")[0]);
 if (new Set(migrationVersions).size === migrationVersions.length)
   pass(`${migrationNames.length} migration versions are unique`);
 else fail("Migration versions contain duplicates");
-if (
-  migrationNames.at(-1) ===
-  "20260810030000_fix_moderator_logout_permissions.sql"
-)
-  pass("Signed-out permission fix is the latest migration");
-else fail("Expected signed-out permission migration is not latest");
+if (migrationNames.includes("20260810030000_fix_moderator_logout_permissions.sql"))
+  pass("Signed-out permission fix is present");
+else fail("Expected signed-out permission migration is missing");
+if (migrationNames.at(-1) === "20260811000000_release_operations.sql")
+  pass("Release operations migration is latest");
+else fail("Expected release operations migration is not latest");
 
 const normalize = (value) =>
   value

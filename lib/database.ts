@@ -31,6 +31,7 @@ export type DatabaseBeverage = {
   average_rating: number | string;
   review_count: number;
   created_at?: string;
+  lifecycle_status?: CatalogueLifecycle;
 };
 
 export type DatabaseReview = {
@@ -154,6 +155,65 @@ export type DatabaseModerationReport = {
   target_user_id: string | null;
   target_user_name: string | null;
   content_preview: string | null;
+};
+
+export type CatalogueLifecycle =
+  | "draft"
+  | "active"
+  | "discontinued"
+  | "duplicate"
+  | "archived";
+
+export type DatabaseAdminBeverage = {
+  id: string;
+  name: string;
+  category: string;
+  subtype: string | null;
+  brand: string | null;
+  image_url: string | null;
+  is_published: boolean;
+  lifecycle_status: CatalogueLifecycle;
+  duplicate_of: string | null;
+  admin_note: string;
+  updated_at: string;
+  potential_duplicate_ids?: string[];
+};
+
+export type DatabaseAdminDrinkRequest = {
+  id: string;
+  user_id: string;
+  drink_name: string;
+  status: "pending" | "approved" | "rejected";
+  resolution_note: string;
+  resolved_beverage_id: string | null;
+  created_at: string;
+  profiles:
+    | { display_name: string; username: string | null }
+    | { display_name: string; username: string | null }[]
+    | null;
+};
+
+export type NotificationKind =
+  | "review_like"
+  | "review_comment"
+  | "follow"
+  | "badge_earned";
+
+export type DatabaseNotification = {
+  id: string;
+  kind: NotificationKind;
+  review_id: string | null;
+  comment_id: string | null;
+  badge_id: string | null;
+  beverage_id: string | null;
+  is_read: boolean;
+  created_at: string;
+  actor:
+    | { id: string; display_name: string; username: string | null; avatar_url: string | null }
+    | { id: string; display_name: string; username: string | null; avatar_url: string | null }[]
+    | null;
+  badges: { name: string } | { name: string }[] | null;
+  beverages: { name: string } | { name: string }[] | null;
 };
 
 function client() {
@@ -296,8 +356,21 @@ export async function saveReview(input: {
 }
 
 export async function deleteReview(reviewId: string) {
-  const response = await client().from("reviews").delete().eq("id", reviewId);
-  result(response.data, response.error);
+  const response = await client()
+    .from("reviews")
+    .delete()
+    .eq("id", reviewId)
+    .select("id")
+    .maybeSingle();
+  const deleted = result(response.data, response.error) as
+    | { id: string }
+    | null;
+  if (!deleted?.id) {
+    throw new Error(
+      "This review could not be deleted. Refresh your profile and try again.",
+    );
+  }
+  return deleted.id;
 }
 
 export async function loadLikedReviewIds(userId: string) {
@@ -439,6 +512,102 @@ export async function resolveModerationReport(
   result(response.data, response.error);
 }
 
+export async function loadAdminCatalogue() {
+  const response = await client()
+    .from("beverages")
+    .select(
+      "id,name,category,subtype,brand,image_url,is_published,lifecycle_status,duplicate_of,admin_note,updated_at",
+    )
+    .order("updated_at", { ascending: false });
+  const rows = (result(response.data, response.error) || []) as DatabaseAdminBeverage[];
+  const normalizedName = (name: string) =>
+    name
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "");
+  const groups = new Map<string, string[]>();
+  rows.forEach((row) => {
+    const key = normalizedName(row.name);
+    groups.set(key, [...(groups.get(key) || []), row.id]);
+  });
+  return rows.map((row) => ({
+    ...row,
+    potential_duplicate_ids: (groups.get(normalizedName(row.name)) || []).filter(
+      (id) => id !== row.id,
+    ),
+  }));
+}
+
+export async function updateAdminBeverage(input: {
+  beverageId: string;
+  status: CatalogueLifecycle;
+  duplicateOf?: string;
+  note?: string;
+}) {
+  const response = await client().rpc("admin_update_beverage", {
+    target_beverage_id: input.beverageId,
+    next_status: input.status,
+    duplicate_beverage_id: input.duplicateOf || null,
+    note: input.note?.trim() || "",
+  });
+  result(response.data, response.error);
+}
+
+export async function loadAdminDrinkRequests() {
+  const response = await client()
+    .from("drink_requests")
+    .select(
+      "id,user_id,drink_name,status,resolution_note,resolved_beverage_id,created_at,profiles!drink_requests_user_id_fkey(display_name,username)",
+    )
+    .order("created_at", { ascending: false });
+  return (result(response.data, response.error) || []) as DatabaseAdminDrinkRequest[];
+}
+
+export async function resolveAdminDrinkRequest(input: {
+  requestId: string;
+  status: "pending" | "approved" | "rejected";
+  note?: string;
+  beverageId?: string;
+}) {
+  const response = await client().rpc("admin_resolve_drink_request", {
+    target_request_id: input.requestId,
+    next_status: input.status,
+    note: input.note?.trim() || "",
+    linked_beverage_id: input.beverageId || null,
+  });
+  result(response.data, response.error);
+}
+
+export async function loadNotifications(userId: string) {
+  const response = await client()
+    .from("notifications")
+    .select(
+      "id,kind,review_id,comment_id,badge_id,beverage_id,is_read,created_at,actor:profiles!notifications_actor_id_fkey(id,display_name,username,avatar_url),badges(name),beverages(name)",
+    )
+    .eq("user_id", userId)
+    .order("created_at", { ascending: false })
+    .limit(100);
+  return (result(response.data, response.error) || []) as DatabaseNotification[];
+}
+
+export async function markNotificationRead(notificationId: string) {
+  const response = await client()
+    .from("notifications")
+    .update({ is_read: true })
+    .eq("id", notificationId);
+  result(response.data, response.error);
+}
+
+export async function markAllNotificationsRead(userId: string) {
+  const response = await client()
+    .from("notifications")
+    .update({ is_read: true })
+    .eq("user_id", userId)
+    .eq("is_read", false);
+  result(response.data, response.error);
+}
+
 export async function toggleFollow(profileId: string) {
   const response = await client().rpc("toggle_follow", {
     target_profile_id: profileId,
@@ -511,6 +680,9 @@ export async function exportCurrentUserData(userId: string) {
     client().from("user_badges").select("*").eq("user_id", userId),
     client().from("user_blocks").select("*").eq("blocker_id", userId),
     client().from("content_reports").select("*").eq("reporter_id", userId),
+    client().from("notifications").select("*").eq("user_id", userId),
+    client().from("analytics_events").select("*").eq("user_id", userId),
+    client().from("crash_reports").select("*").eq("user_id", userId),
   ] as const;
   const [
     profile,
@@ -523,6 +695,9 @@ export async function exportCurrentUserData(userId: string) {
     badges,
     blocks,
     reports,
+    notifications,
+    analytics,
+    crashReports,
   ] = await Promise.all(requests);
 
   const checked = <T>(response: {
@@ -542,6 +717,9 @@ export async function exportCurrentUserData(userId: string) {
     badges: checked(badges),
     blocks: checked(blocks),
     reports: checked(reports),
+    notifications: checked(notifications),
+    analytics_events: checked(analytics),
+    crash_reports: checked(crashReports),
   };
 }
 

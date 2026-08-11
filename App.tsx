@@ -24,12 +24,15 @@ import {
   CirclePlus,
   Edit3,
   Ban,
+  Bell,
   Flag,
   Heart,
   LogOut,
+  ListFilter,
   Mail,
   MapPin,
   MessageCircle,
+  MoreVertical,
   Scale,
   Search,
   Settings,
@@ -117,6 +120,7 @@ import {
   DatabaseChatMessage,
   DatabaseComment,
   DatabaseModerationReport,
+  DatabaseNotification,
   DatabaseProfile,
   DatabaseReview,
   createGroupChat,
@@ -135,6 +139,7 @@ import {
   loadGroupChatMessages,
   loadLikedReviewIds,
   loadModerationQueue,
+  loadNotifications,
   loadModeratorStatus,
   loadProfiles,
   loadReviewComments,
@@ -152,11 +157,14 @@ import {
   joinGroupChatByInvite,
   unblockProfile,
   resolveModerationReport,
+  markAllNotificationsRead,
+  markNotificationRead,
   updateCurrentDateOfBirth,
   updateCurrentProfile,
   uploadAvatar,
   uploadGroupImage,
 } from "./lib/database";
+import { trackEvent } from "./lib/telemetry";
 import { isSupabaseConfigured, supabase } from "./lib/supabase";
 import { catalogueImages } from "./src/data/catalogueImages";
 import { newCatalogueBeverages } from "./src/data/newCatalogueBeverages";
@@ -165,6 +173,7 @@ import type {
   GroupChatMember,
   GroupChatRoomMessage,
 } from "./src/archived/GroupChats";
+import { AppRoute, parseAppUrl } from "./src/navigation/router";
 import {
   ModerationQueueContent,
   PasswordResetModal,
@@ -172,6 +181,8 @@ import {
   ReportTarget,
   TermsAcceptanceModal,
 } from "./src/components/ReleaseSafety";
+import { AdminOperationsContent } from "./src/components/AdminOperations";
+import { NotificationsContent } from "./src/components/Notifications";
 import {
   drinks,
   featuredCatalogueOrder,
@@ -204,6 +215,7 @@ const STORAGE_KEY = "saturated-state-v7";
 const rememberedScrollOffsets = new Map<string, number>();
 let exploreBrowseAllSeed = Math.floor(Math.random() * 0xffffffff);
 let exploreSelectedFilter = "All";
+let exploreDiscoveryLocation: string | null = null;
 let rememberedSearchQuery = "";
 let rememberedSearchMode: "beverages" | "profiles" = "beverages";
 
@@ -229,6 +241,12 @@ function searchTextMatches(query: string, values: string[]) {
     compactSearchable.includes(compactQuery) ||
     queryWords.every((word) => searchable.includes(word))
   );
+}
+
+function reviewUsernameLabel(review: Review) {
+  const username =
+    review.username || review.user.toLowerCase().replace(/[^a-z0-9]+/g, "");
+  return username.startsWith("@") ? username : `@${username}`;
 }
 
 const REGIONAL_DISCOVERY_PROFILES = [
@@ -428,7 +446,10 @@ const PENDING_BIRTH_DATE_KEY = "saturated-pending-date-of-birth";
 const PENDING_AVATAR_URI_KEY = "saturated-pending-avatar-uri";
 const PENDING_USERNAME_KEY = "saturated-pending-username";
 const PENDING_TERMS_ACCEPTANCE_KEY = "saturated-pending-terms-acceptance";
+const PENDING_PASSWORD_RECOVERY_KEY = "saturated-pending-password-recovery";
 const DISCOVERY_LOCATION_KEY = "saturated-discovery-location";
+const SOCIAL_AUTH_BIRTH_DATE_KEY = "saturated-social-auth-date-of-birth";
+const SOCIAL_AUTH_TERMS_KEY = "saturated-social-auth-terms-accepted";
 const CHAT_GROUPS_STORAGE_KEY = "saturated-chat-groups-v1";
 const PENDING_GROUP_INVITE_KEY = "saturated-pending-group-invite";
 const BlurTargetContext = createContext<React.RefObject<View | null> | null>(
@@ -664,6 +685,10 @@ function beverageFromDatabase(beverage: DatabaseBeverage): Drink {
         : correction?.brand ||
           consumerBrandName(beverage.name, beverage.brand, beverage.category),
     createdAt: beverage.created_at || undefined,
+    lifecycleStatus:
+      beverage.lifecycle_status === "discontinued"
+        ? "discontinued"
+        : "active",
   };
 }
 
@@ -673,6 +698,11 @@ function reviewFromDatabase(review: DatabaseReview): Review {
     drinkId: review.beverage_id,
     userId: review.user_id,
     user: review.display_name || review.username || "Saturated User",
+    username: review.username
+      ? `@${review.username.replace(/^@/, "")}`
+      : `@${(review.display_name || "saturateduser")
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, "")}`,
     avatar: review.avatar_url ? { uri: review.avatar_url } : undefined,
     rating: Number(review.rating),
     text: review.body,
@@ -1167,7 +1197,7 @@ function Heading({
         <Pressable
           accessibilityRole="button"
           accessibilityLabel="Go back"
-          onPress={onBack}
+          onPressIn={onBack}
         >
           <ArrowLeftCircle size={38} color={C.ink} />
         </Pressable>
@@ -1540,16 +1570,49 @@ function Onboarding({
   const [noticeTone, setNoticeTone] = useState<"success" | "error">("success");
   const [busy, setBusy] = useState(false);
   const [termsAccepted, setTermsAccepted] = useState(false);
+  const [socialConsentProvider, setSocialConsentProvider] = useState<
+    "google" | "apple" | null
+  >(null);
+  const [socialDateOfBirth, setSocialDateOfBirth] = useState("");
+  const [socialTermsAccepted, setSocialTermsAccepted] = useState(false);
+  const [socialConsentError, setSocialConsentError] = useState("");
   const [accountMode, setAccountMode] = useState<"social" | "email" | "create">(
     "social",
   );
   const emailLoginScrollRef = useRef<ScrollView | null>(null);
+  const cancelSocialConsent = () => {
+    setSocialConsentProvider(null);
+    setSocialDateOfBirth("");
+    setSocialTermsAccepted(false);
+    setSocialConsentError("");
+  };
   useEffect(() => {
     if (!visible) {
       setAccountMode("social");
       setNotice("");
+      cancelSocialConsent();
     }
   }, [visible]);
+  useEffect(() => {
+    if (Platform.OS !== "android" || !visible) return;
+    const subscription = BackHandler.addEventListener(
+      "hardwareBackPress",
+      () => {
+        if (socialConsentProvider) {
+          cancelSocialConsent();
+          return true;
+        }
+        if (accountMode !== "social") {
+          Keyboard.dismiss();
+          setNotice("");
+          setAccountMode("social");
+          return true;
+        }
+        return false;
+      },
+    );
+    return () => subscription.remove();
+  }, [accountMode, socialConsentProvider, visible]);
   const run = async (operation: () => Promise<void>) => {
     try {
       setBusy(true);
@@ -1619,17 +1682,56 @@ function Onboarding({
       }
     });
   };
-  const finishProvider = async (provider: "google" | "apple") => {
-    if (!termsAccepted)
-      return showFormError(
+  const beginProvider = async (provider: "google" | "apple") => {
+    const [storedBirthDate, storedTerms] = await Promise.all([
+      AsyncStorage.getItem(SOCIAL_AUTH_BIRTH_DATE_KEY),
+      AsyncStorage.getItem(SOCIAL_AUTH_TERMS_KEY),
+    ]);
+    if (storedBirthDate && storedTerms === "accepted") {
+      await run(() => onProvider(provider, storedBirthDate));
+      return;
+    }
+    setSocialConsentError("");
+    setSocialDateOfBirth("");
+    setSocialTermsAccepted(false);
+    setSocialConsentProvider(provider);
+  };
+  const finishProviderConsent = async () => {
+    if (!socialConsentProvider) return;
+    if (!socialTermsAccepted) {
+      setSocialConsentError(
         "Accept the Terms and Community Guidelines to continue.",
       );
-    const normalizedBirthDate = validatedDateOfBirth(dateOfBirth);
-    if (!normalizedBirthDate)
-      return showFormError("Enter your date of birth as DD/MM/YYYY.");
-    if (normalizedBirthDate === "underage")
-      return showFormError("You must be 18+ to use this app.");
-    await run(() => onProvider(provider, normalizedBirthDate));
+      return;
+    }
+    const normalizedBirthDate = validatedDateOfBirth(socialDateOfBirth);
+    if (!normalizedBirthDate) {
+      setSocialConsentError("Enter your date of birth as DD/MM/YYYY.");
+      return;
+    }
+    if (normalizedBirthDate === "underage") {
+      setSocialConsentError("You must be 18+ to use this app.");
+      return;
+    }
+    try {
+      setBusy(true);
+      setSocialConsentError("");
+      await Promise.all([
+        AsyncStorage.setItem(
+          SOCIAL_AUTH_BIRTH_DATE_KEY,
+          normalizedBirthDate,
+        ),
+        AsyncStorage.setItem(SOCIAL_AUTH_TERMS_KEY, "accepted"),
+      ]);
+      await onProvider(socialConsentProvider, normalizedBirthDate);
+      setSocialConsentProvider(null);
+    } catch (error) {
+      setSocialConsentError(
+        error instanceof Error ? error.message : "Could not continue sign-in.",
+      );
+    } finally {
+      setBusy(false);
+    }
   };
   const chooseProfilePhoto = async () => {
     const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
@@ -1737,6 +1839,10 @@ function Onboarding({
       }
       statusBarTranslucent
       navigationBarTranslucent={false}
+      onRequestClose={() => {
+        if (socialConsentProvider) cancelSocialConsent();
+        else if (accountMode !== "social") setAccountMode("social");
+      }}
     >
       <StatusBar
         style={accountMode === "social" ? "light" : "dark"}
@@ -1846,7 +1952,7 @@ function Onboarding({
                 <Pressable
                   accessibilityRole="button"
                   accessibilityLabel="Back to sign in options"
-                  onPress={() => {
+                  onPressIn={() => {
                     setNotice("");
                     setAccountMode("social");
                   }}
@@ -1876,7 +1982,7 @@ function Onboarding({
                 <Pressable
                   accessibilityRole="button"
                   accessibilityLabel="Back to sign in options"
-                  onPress={() => {
+                  onPressIn={() => {
                     setNotice("");
                     setAccountMode("social");
                   }}
@@ -1953,119 +2059,11 @@ function Onboarding({
         ) : (
           <SafeAreaView style={s.modalWrap} edges={["bottom"]}>
             <View style={s.onboard}>
-              <View style={s.handle} />
               <Text style={s.onboardTitle}>Welcome</Text>
               <Text numberOfLines={1} adjustsFontSizeToFit style={s.onboardAge}>
                 Saturated contains alcohol-related content and is for adults
                 aged 18+.
               </Text>
-              {birthDateField}
-              {accountMode === "social" ? (
-                <>
-                  <Text style={s.loginWithTitle}>Login with</Text>
-                  <View style={s.loginIconRow}>
-                    <Pressable
-                      accessibilityRole="button"
-                      accessibilityLabel="Continue with Google"
-                      style={s.loginIconButton}
-                      disabled={busy}
-                      onPress={() => void finishProvider("google")}
-                    >
-                      <GoogleLogo size={25} />
-                    </Pressable>
-                    <Pressable
-                      accessibilityRole="button"
-                      accessibilityLabel="Continue with Apple"
-                      style={s.loginIconButton}
-                      disabled={busy}
-                      onPress={() => void finishProvider("apple")}
-                    >
-                      <AppleLogo size={25} />
-                    </Pressable>
-                    <Pressable
-                      accessibilityRole="button"
-                      accessibilityLabel="Continue with email"
-                      style={s.loginIconButton}
-                      onPress={() => {
-                        setNotice("");
-                        setAccountMode("email");
-                      }}
-                    >
-                      <Mail size={24} color={C.teal} />
-                    </Pressable>
-                  </View>
-                </>
-              ) : (
-                <>
-                  <TextInput
-                    autoFocus
-                    value={email}
-                    onChangeText={setEmail}
-                    autoCapitalize="none"
-                    keyboardType="email-address"
-                    placeholder="Email address"
-                    placeholderTextColor="rgba(32,26,27,.45)"
-                    style={s.input}
-                  />
-                  <TextInput
-                    value={password}
-                    onChangeText={setPassword}
-                    autoCapitalize="none"
-                    secureTextEntry
-                    placeholder="Password (8+ characters)"
-                    placeholderTextColor="rgba(32,26,27,.45)"
-                    style={s.input}
-                  />
-                  <Pressable
-                    style={[s.primary, s.onboardControl]}
-                    accessibilityRole="button"
-                    accessibilityLabel={"Sign in"}
-                    disabled={busy}
-                    onPress={() => void finishEmail()}
-                  >
-                    {busy ? (
-                      <ActivityIndicator color="#fff" />
-                    ) : (
-                      <Text style={s.primaryText}>Sign in</Text>
-                    )}
-                  </Pressable>
-                  <Pressable
-                    accessibilityRole="button"
-                    accessibilityLabel="Reset forgotten password"
-                    disabled={busy}
-                    onPress={() => {
-                      if (!email.trim() || !email.includes("@")) {
-                        showFormError("Enter your email address first.");
-                        return;
-                      }
-                      void run(async () => {
-                        await onForgotPassword(email.trim());
-                        setNoticeTone("success");
-                        setNotice(
-                          "Password reset sent. Open the email link, then return to Saturated.",
-                        );
-                      });
-                    }}
-                    style={s.textButton}
-                  >
-                    <Text style={s.textButtonText}>Forgot password?</Text>
-                  </Pressable>
-                  <Pressable
-                    accessibilityRole="button"
-                    accessibilityLabel="Back to sign in options"
-                    onPress={() => {
-                      setNotice("");
-                      setAccountMode("social");
-                    }}
-                    style={s.textButton}
-                  >
-                    <Text style={[s.textButtonText, s.backToSignInText]}>
-                      Back to sign in options
-                    </Text>
-                  </Pressable>
-                </>
-              )}
-              {noticeContent}
               <Pressable
                 accessibilityRole="button"
                 accessibilityLabel="Create an account"
@@ -2078,11 +2076,139 @@ function Onboarding({
                 <UserPlus size={18} color={C.red} />
                 <Text style={s.createAccountText}>Create an account</Text>
               </Pressable>
-              {termsField}
+              <Text style={s.loginWithTitle}>or Login with</Text>
+              <View style={s.loginIconRow}>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Continue with Google"
+                  style={s.loginIconButton}
+                  disabled={busy}
+                  onPress={() => void beginProvider("google")}
+                >
+                  <GoogleLogo size={25} />
+                </Pressable>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Continue with Apple"
+                  style={s.loginIconButton}
+                  disabled={busy}
+                  onPress={() => void beginProvider("apple")}
+                >
+                  <AppleLogo size={25} />
+                </Pressable>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Continue with email"
+                  style={s.loginIconButton}
+                  onPress={() => {
+                    setNotice("");
+                    setAccountMode("email");
+                  }}
+                >
+                  <Mail size={24} color={C.teal} />
+                </Pressable>
+              </View>
+              {noticeContent}
             </View>
           </SafeAreaView>
         )}
       </TouchableWithoutFeedback>
+      {!!socialConsentProvider && (
+        <KeyboardAvoidingView
+          pointerEvents="box-none"
+          behavior={Platform.OS === "ios" ? "padding" : undefined}
+          style={s.socialConsentOverlay}
+        >
+          <View style={s.socialConsentCard}>
+            <Text style={s.logoutConfirmTitle}>Legal Age Confirmation</Text>
+            <Text style={[s.logoutConfirmCopy, s.socialConsentCopy]}>
+              Enter your date of birth and accept the community terms before
+              continuing with {socialConsentProvider === "google" ? "Google" : "Apple"}.
+            </Text>
+            <TextInput
+              autoFocus
+              value={socialDateOfBirth}
+              onChangeText={(value) =>
+                setSocialDateOfBirth(formatDateOfBirth(value))
+              }
+              keyboardType="number-pad"
+              maxLength={10}
+              placeholder="Date of birth (DD/MM/YYYY)"
+              placeholderTextColor="rgba(32,26,27,.52)"
+              style={[s.birthDateInput, s.socialConsentInput]}
+            />
+            <Pressable
+              accessibilityRole="checkbox"
+              accessibilityState={{ checked: socialTermsAccepted }}
+              accessibilityLabel="Accept Terms and Community Guidelines"
+              onPress={() =>
+                setSocialTermsAccepted((accepted) => !accepted)
+              }
+              style={[s.termsAcceptRow, s.socialConsentTermsRow]}
+            >
+              <View
+                style={[
+                  s.termsCheckbox,
+                  socialTermsAccepted && s.termsCheckboxActive,
+                ]}
+              >
+                {socialTermsAccepted && <Text style={s.termsCheckmark}>✓</Text>}
+              </View>
+              <Text style={s.termsAcceptText}>
+                I agree to Saturated&apos;s Terms and Community Guidelines.
+              </Text>
+            </Pressable>
+            <View style={[s.termsLinksRow, s.socialConsentLinks]}>
+              <Pressable
+                onPress={() =>
+                  void Linking.openURL(
+                    "https://suppixie.github.io/Saturated-App/terms/",
+                  )
+                }
+              >
+                <Text style={s.termsLink}>Terms</Text>
+              </Pressable>
+              <Text style={s.termsLinkDivider}>•</Text>
+              <Pressable
+                onPress={() =>
+                  void Linking.openURL(
+                    "https://suppixie.github.io/Saturated-App/community-guidelines/",
+                  )
+                }
+              >
+                <Text style={s.termsLink}>Community Guidelines</Text>
+              </Pressable>
+            </View>
+            {!!socialConsentError && (
+              <Text style={s.socialConsentError}>{socialConsentError}</Text>
+            )}
+            <View style={[s.logoutConfirmActions, s.socialConsentActions]}>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Cancel social sign in"
+                disabled={busy}
+                onPress={cancelSocialConsent}
+                style={s.logoutCancelButton}
+              >
+                <Text style={s.secondaryText}>Cancel</Text>
+              </Pressable>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={`Continue with ${socialConsentProvider}`}
+                disabled={busy}
+                onPress={() => void finishProviderConsent()}
+                style={s.logoutConfirmButton}
+              >
+                {busy ? (
+                  <ActivityIndicator color="#fff" size="small" />
+                ) : (
+                  <Text style={s.primaryText}>Continue</Text>
+                )}
+              </Pressable>
+            </View>
+          </View>
+        </KeyboardAvoidingView>
+      )}
     </Modal>
   );
 }
@@ -2266,6 +2392,7 @@ function Explore({
   items,
   reviews,
   currentUserId,
+  unreadNotificationCount,
   onOpen,
   onGo,
   onRefreshData,
@@ -2273,6 +2400,7 @@ function Explore({
   items: Drink[];
   reviews: Review[];
   currentUserId?: string;
+  unreadNotificationCount?: number;
   onOpen: (d: Drink) => void;
   onGo: (s: Screen, fromNavbar?: boolean) => void;
   onRefreshData?: () => Promise<void>;
@@ -2287,7 +2415,12 @@ function Explore({
   );
   const [browseAllSeed, setBrowseAllSeed] = useState(exploreBrowseAllSeed);
   const [refreshing, setRefreshing] = useState(false);
-  const [locationLabel, setLocationLabel] = useState("");
+  const [locationLabel, setLocationLabel] = useState(
+    exploreDiscoveryLocation || "",
+  );
+  const [locationHydrated, setLocationHydrated] = useState(
+    exploreDiscoveryLocation !== null,
+  );
   const [locationDraft, setLocationDraft] = useState("");
   const [locationOpen, setLocationOpen] = useState(false);
   const filterOptions = [
@@ -2425,14 +2558,22 @@ function Explore({
     [],
   );
   useEffect(() => {
-    void AsyncStorage.getItem(DISCOVERY_LOCATION_KEY).then((storedLocation) => {
-      if (!storedLocation) return;
-      setLocationLabel(storedLocation);
-      setLocationDraft(storedLocation);
-    });
+    if (exploreDiscoveryLocation !== null) {
+      setLocationHydrated(true);
+      return;
+    }
+    void AsyncStorage.getItem(DISCOVERY_LOCATION_KEY)
+      .then((storedLocation) => {
+        const resolvedLocation = storedLocation || "";
+        exploreDiscoveryLocation = resolvedLocation;
+        setLocationLabel(resolvedLocation);
+        setLocationDraft(resolvedLocation);
+      })
+      .finally(() => setLocationHydrated(true));
   }, []);
   const saveLocation = async () => {
     const nextLocation = locationDraft.trim();
+    exploreDiscoveryLocation = nextLocation;
     setLocationLabel(nextLocation);
     if (nextLocation) {
       await AsyncStorage.setItem(DISCOVERY_LOCATION_KEY, nextLocation);
@@ -2511,11 +2652,26 @@ function Explore({
         <View style={s.iconRow}>
           <Pressable
             accessibilityRole="button"
+            accessibilityLabel={`Open notifications${unreadNotificationCount ? `, ${unreadNotificationCount} unread` : ""}`}
+            onPress={() => onGo("notifications")}
+            style={s.headerIcon}
+          >
+            <Bell color={C.red} size={24} />
+            {!!unreadNotificationCount && (
+              <View style={s.notificationBadge}>
+                <Text style={s.notificationBadgeText}>
+                  {unreadNotificationCount > 9 ? "9+" : unreadNotificationCount}
+                </Text>
+              </View>
+            )}
+          </Pressable>
+          <Pressable
+            accessibilityRole="button"
             accessibilityLabel="Search drinks"
             onPress={() => onGo("search")}
             style={s.headerIcon}
           >
-            <Search color={C.red} size={23} />
+            <Search color={C.red} size={25} />
           </Pressable>
           <Pressable
             accessibilityRole="button"
@@ -2523,7 +2679,7 @@ function Explore({
             onPress={() => onGo("feed")}
             style={s.headerIcon}
           >
-            <Users color={C.red} size={23} />
+            <Users color={C.red} size={25} />
           </Pressable>
         </View>
       </View>
@@ -2577,21 +2733,27 @@ function Explore({
                 items={forYou}
                 onOpen={onOpen}
               />
-              <ExploreDrinkRail
-                title={
-                  locationLabel
-                    ? `Trending near ${locationLabel}`
-                    : "Trending Near You"
-                }
-                subtitle="Add your location for local discovery of beverages"
-                items={trending}
-                onOpen={onOpen}
-                actionLabel={locationLabel ? "Change area" : "Set area"}
-                onAction={() => {
-                  setLocationDraft(locationLabel);
-                  setLocationOpen(true);
-                }}
-              />
+              {locationHydrated ? (
+                <ExploreDrinkRail
+                  title={
+                    locationLabel
+                      ? `Trending near ${locationLabel}`
+                      : "Trending Near You"
+                  }
+                  subtitle="Add your location for local discovery of beverages"
+                  items={trending}
+                  onOpen={onOpen}
+                  actionLabel={locationLabel ? "Change area" : "Set area"}
+                  onAction={() => {
+                    setLocationDraft(locationLabel);
+                    setLocationOpen(true);
+                  }}
+                />
+              ) : (
+                <View style={s.exploreLocationLoading}>
+                  <ActivityIndicator color={C.teal} size="small" />
+                </View>
+              )}
               <ExploreDrinkRail
                 title="Seasonal Picks"
                 items={seasonalPicks}
@@ -2721,6 +2883,19 @@ function SearchScreen({
     (profile) =>
       canSearch && searchTextMatches(query, [profile.name, profile.handle]),
   );
+  useEffect(() => {
+    if (!canSearch) return;
+    const timer = setTimeout(() => {
+      void trackEvent("search_performed", {
+        mode,
+        result_count:
+          mode === "beverages"
+            ? beverageResults.length
+            : profileResults.length,
+      });
+    }, 600);
+    return () => clearTimeout(timer);
+  }, [beverageResults.length, canSearch, mode, normalized, profileResults.length]);
 
   return (
     <Background>
@@ -3053,7 +3228,7 @@ function Drinklist({
             onPress={() => onGo("search")}
             style={s.headerIcon}
           >
-            <Search color={C.red} size={23} />
+            <Search color={C.red} size={25} />
           </Pressable>
         </View>
       </View>
@@ -3192,8 +3367,8 @@ function ReviewCard({
                 }}
                 style={s.reviewNameButton}
               >
-                <Text numberOfLines={1} style={s.body}>
-                  {review.user}
+                <Text numberOfLines={1} style={s.reviewUsernamePrimary}>
+                  {reviewUsernameLabel(review)}
                 </Text>
               </Pressable>
               <Rating value={review.rating} size={12} />
@@ -3217,7 +3392,9 @@ function ReviewCard({
           </View>
         </View>
         <View style={{ marginVertical: 9 }}>
-          <Text style={s.reviewText}>{review.text}</Text>
+          <Text numberOfLines={3} ellipsizeMode="tail" style={s.reviewText}>
+            {review.text}
+          </Text>
         </View>
         <View style={[s.inline, { justifyContent: "space-between" }]}>
           <View style={s.inline}>
@@ -3279,6 +3456,9 @@ function ReviewDetailScreen({
   onReportComment,
   onOpenProfile,
   onOpenDrink,
+  isOwnReview,
+  onEditReview,
+  onDeleteReview,
 }: {
   review: Review;
   drink: Drink;
@@ -3291,8 +3471,39 @@ function ReviewDetailScreen({
   onReportComment: (comment: ReviewComment) => void;
   onOpenProfile: (user: string) => void;
   onOpenDrink: (drink: Drink) => void;
+  isOwnReview: boolean;
+  onEditReview: () => void;
+  onDeleteReview: () => Promise<void>;
 }) {
   const [comment, setComment] = useState("");
+  const [reviewMenuOpen, setReviewMenuOpen] = useState(false);
+  const [deleteReviewVisible, setDeleteReviewVisible] = useState(false);
+  const [deletingReview, setDeletingReview] = useState(false);
+  const [commentKeyboardHeight, setCommentKeyboardHeight] = useState(0);
+  const {
+    width: reviewThreadWindowWidth,
+    height: reviewThreadWindowHeight,
+  } = useWindowDimensions();
+  const fullReviewThreadHeight = useRef(reviewThreadWindowHeight);
+  if (!commentKeyboardHeight) {
+    fullReviewThreadHeight.current = Math.max(
+      fullReviewThreadHeight.current,
+      reviewThreadWindowHeight,
+    );
+  }
+  const reviewThreadWindowShrink = Math.max(
+    0,
+    fullReviewThreadHeight.current - reviewThreadWindowHeight,
+  );
+  const reviewThreadScale = Math.min(
+    1,
+    reviewThreadWindowWidth / FIGMA_FRAME_WIDTH,
+  );
+  const commentKeyboardOverlap =
+    Platform.OS === "android" && commentKeyboardHeight
+      ? Math.max(0, commentKeyboardHeight - reviewThreadWindowShrink) /
+        reviewThreadScale
+      : 0;
   const reviewThreadScroll = useRememberedScroll(`review-thread-${review.id}`);
   const commentScrollRef = reviewThreadScroll.ref;
   const submitComment = () => {
@@ -3301,20 +3512,38 @@ function ReviewDetailScreen({
     onAddComment(nextComment);
     setComment("");
   };
+  useEffect(() => {
+    const shown = Keyboard.addListener("keyboardDidShow", (event) => {
+      setCommentKeyboardHeight(event.endCoordinates.height);
+      setTimeout(
+        () => commentScrollRef.current?.scrollToEnd({ animated: true }),
+        80,
+      );
+    });
+    const hidden = Keyboard.addListener("keyboardDidHide", () =>
+      setCommentKeyboardHeight(0),
+    );
+    return () => {
+      shown.remove();
+      hidden.remove();
+    };
+  }, [commentScrollRef]);
   return (
     <Background>
       <Heading back onBack={onBack}>
         Review Thread
       </Heading>
-      <ScrollView
-        ref={commentScrollRef}
-        onScroll={reviewThreadScroll.onScroll}
-        scrollEventThrottle={reviewThreadScroll.scrollEventThrottle}
-        showsVerticalScrollIndicator={false}
-        style={s.screenScroll}
-        keyboardShouldPersistTaps="handled"
-        contentContainerStyle={s.reviewDetailContent}
-      >
+      <View style={s.reviewThreadKeyboardArea}>
+        <ScrollView
+          ref={commentScrollRef}
+          onScroll={reviewThreadScroll.onScroll}
+          scrollEventThrottle={reviewThreadScroll.scrollEventThrottle}
+          showsVerticalScrollIndicator={false}
+          style={s.screenScroll}
+          keyboardShouldPersistTaps="handled"
+          keyboardDismissMode="interactive"
+          contentContainerStyle={s.reviewDetailContent}
+        >
         <Pressable
           accessibilityRole="button"
           accessibilityLabel={`Open ${drink.name} drink profile`}
@@ -3363,8 +3592,8 @@ function ReviewDetailScreen({
                     onPress={() => onOpenProfile(review.user)}
                     style={s.reviewNameButton}
                   >
-                    <Text numberOfLines={1} style={s.cardTitle}>
-                      {review.user}
+                    <Text numberOfLines={1} style={s.reviewUsernamePrimary}>
+                      {reviewUsernameLabel(review)}
                     </Text>
                   </Pressable>
                   <Rating value={review.rating} size={13} />
@@ -3372,16 +3601,58 @@ function ReviewDetailScreen({
               </View>
               <View style={s.reviewDateActions}>
                 <Text style={s.tiny}>{review.date}</Text>
-                <Pressable
-                  accessibilityRole="button"
-                  accessibilityLabel="Report this review"
-                  onPress={() => onReportReview(review)}
-                  style={s.reportIconButton}
-                >
-                  <Flag size={13} color={C.red} />
-                </Pressable>
+                {isOwnReview ? (
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel="Open review actions"
+                    accessibilityState={{ expanded: reviewMenuOpen }}
+                    onPress={() => setReviewMenuOpen((open) => !open)}
+                    style={s.reportIconButton}
+                  >
+                    <MoreVertical size={16} color={C.teal} />
+                  </Pressable>
+                ) : (
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel="Report this review"
+                    onPress={() => onReportReview(review)}
+                    style={s.reportIconButton}
+                  >
+                    <Flag size={13} color={C.red} />
+                  </Pressable>
+                )}
               </View>
             </View>
+            {isOwnReview && reviewMenuOpen && (
+              <View style={s.reviewOwnerMenu}>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Edit this review"
+                  onPress={() => {
+                    setReviewMenuOpen(false);
+                    onEditReview();
+                  }}
+                  style={s.reviewOwnerMenuItem}
+                >
+                  <Edit3 size={14} color={C.teal} />
+                  <Text style={s.reviewOwnerMenuText}>Edit review</Text>
+                </Pressable>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Delete this review"
+                  onPress={() => {
+                    setReviewMenuOpen(false);
+                    setDeleteReviewVisible(true);
+                  }}
+                  style={s.reviewOwnerMenuItem}
+                >
+                  <Trash2 size={14} color={C.red} />
+                  <Text style={[s.reviewOwnerMenuText, { color: C.red }]}>
+                    Delete review
+                  </Text>
+                </Pressable>
+              </View>
+            )}
             <Text style={s.reviewDetailText}>{review.text}</Text>
             {!!review.imageUrls?.[0] && (
               <Image
@@ -3466,7 +3737,16 @@ function ReviewDetailScreen({
         ) : (
           <Text style={s.reviewNoComments}>Be the first to comment.</Text>
         )}
-        <View style={s.commentComposer}>
+        </ScrollView>
+        <View
+          style={[
+            s.commentComposer,
+            s.commentComposerDocked,
+            commentKeyboardOverlap > 0 && {
+              marginBottom: commentKeyboardOverlap + 2,
+            },
+          ]}
+        >
           <TextInput
             value={comment}
             onChangeText={setComment}
@@ -3493,7 +3773,84 @@ function ReviewDetailScreen({
             <Text style={s.primaryText}>Post</Text>
           </Pressable>
         </View>
-      </ScrollView>
+      </View>
+      <Modal
+        visible={deleteReviewVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setDeleteReviewVisible(false)}
+      >
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Close delete review confirmation"
+          onPress={() => !deletingReview && setDeleteReviewVisible(false)}
+          style={s.confirmOverlay}
+        >
+          <Pressable
+            accessibilityRole="none"
+            onPress={(event) => event.stopPropagation()}
+            style={s.logoutConfirmCard}
+          >
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Close delete review confirmation"
+              disabled={deletingReview}
+              onPress={() => setDeleteReviewVisible(false)}
+              style={s.confirmCloseButton}
+            >
+              <X size={17} color={C.teal} />
+            </Pressable>
+            <Text style={s.logoutConfirmTitle}>Delete review?</Text>
+            <Text style={s.logoutConfirmCopy}>
+              This removes the review from your profile and the drink page.
+            </Text>
+            <View style={s.logoutConfirmActions}>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Cancel deleting review"
+                disabled={deletingReview}
+                onPress={() => setDeleteReviewVisible(false)}
+                style={s.logoutCancelButton}
+              >
+                <Text style={s.secondaryText}>Cancel</Text>
+              </Pressable>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Confirm deleting review"
+                disabled={deletingReview}
+                onPress={() => {
+                  void (async () => {
+                    try {
+                      setDeletingReview(true);
+                      await onDeleteReview();
+                      setDeleteReviewVisible(false);
+                    } catch (error) {
+                      Alert.alert(
+                        "Could not delete review",
+                        error instanceof Error
+                          ? error.message
+                          : "Please try again.",
+                      );
+                    } finally {
+                      setDeletingReview(false);
+                    }
+                  })();
+                }}
+                style={s.logoutConfirmButton}
+              >
+                {deletingReview ? (
+                  <ActivityIndicator color="#fff" size="small" />
+                ) : (
+                  <>
+                    <Trash2 size={15} color={C.cream} />
+                    <Text style={s.primaryText}>Delete</Text>
+                  </>
+                )}
+              </Pressable>
+            </View>
+          </Pressable>
+        </Pressable>
+      </Modal>
     </Background>
   );
 }
@@ -3528,10 +3885,34 @@ function DrinkProfile({
   onOpenDrink: (drink: Drink) => void;
 }) {
   const [showAllReviews, setShowAllReviews] = useState(false);
+  const [reviewSort, setReviewSort] = useState<"top" | "recent">("top");
+  const [reviewSortOpen, setReviewSortOpen] = useState(false);
   const drinkProfileScroll = useRememberedScroll(`drink-${drink.id}`);
-  useEffect(() => setShowAllReviews(false), [drink.id]);
+  useEffect(() => {
+    setShowAllReviews(false);
+    setReviewSort("top");
+    setReviewSortOpen(false);
+  }, [drink.id]);
   const mine = reviews.filter((r) => r.drinkId === drink.id);
-  const visibleReviews = showAllReviews ? mine : mine.slice(0, 5);
+  const sortedReviews = useMemo(
+    () =>
+      reviewSort === "recent"
+        ? mine
+        : mine
+            .map((reviewItem, index) => ({ reviewItem, index }))
+            .sort(
+              (a, b) =>
+                b.reviewItem.likes * 2 +
+                  b.reviewItem.comments -
+                  (a.reviewItem.likes * 2 + a.reviewItem.comments) ||
+                a.index - b.index,
+            )
+            .map(({ reviewItem }) => reviewItem),
+    [mine, reviewSort],
+  );
+  const visibleReviews = showAllReviews
+    ? sortedReviews
+    : sortedReviews.slice(0, 5);
   const avg = drink.rating;
   const totalReviews =
     drink.reviewCount ?? reviewTotals[drink.id] ?? mine.length;
@@ -3546,7 +3927,7 @@ function DrinkProfile({
       ),
   )
     .sort((a, b) => b[1] - a[1])
-    .slice(0, 6)
+    .slice(0, 5)
     .map(([tag]) => tag);
   const similarDrinks = useMemo(() => {
     const normalizedBrand = drink.brand?.trim().toLowerCase();
@@ -3614,6 +3995,11 @@ function DrinkProfile({
             colors={["rgba(255,255,255,.28)", "rgba(4,178,100,.15)"]}
           />
           <Text style={s.detailTitle}>{drink.name}</Text>
+          {drink.lifecycleStatus === "discontinued" && (
+            <View style={s.discontinuedFlag}>
+              <Text style={s.discontinuedFlagText}>Discontinued</Text>
+            </View>
+          )}
           <View style={s.detailRatingRow}>
             <Rating value={avg} size={17} color={C.ink} />
             <Text style={s.inlineText}>— {totalReviews} Reviews</Text>
@@ -3706,6 +4092,60 @@ function DrinkProfile({
             </Text>
           </View>
         )}
+        {!!mine.length && (
+          <View style={s.reviewSortSection}>
+            <View style={s.reviewSortHeader}>
+              <Text style={s.cardTitle}>Reviews</Text>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Filter reviews"
+                accessibilityState={{ expanded: reviewSortOpen }}
+                onPress={() => setReviewSortOpen((value) => !value)}
+                style={s.reviewSortButton}
+              >
+                <Text style={s.reviewSortCurrentText}>
+                  {reviewSort === "top" ? "Top reviews" : "Most recent"}
+                </Text>
+                <ListFilter size={17} color={C.teal} />
+              </Pressable>
+            </View>
+            {reviewSortOpen && (
+              <View style={s.reviewSortOptions}>
+                {(["top", "recent"] as const).map((option) => (
+                  <Pressable
+                    key={option}
+                    accessibilityRole="radio"
+                    accessibilityState={{ checked: reviewSort === option }}
+                    accessibilityLabel={
+                      option === "top"
+                        ? "Sort by top reviews"
+                        : "Sort by recent reviews"
+                    }
+                    onPress={() => {
+                      setReviewSort(option);
+                      setShowAllReviews(false);
+                      setReviewSortOpen(false);
+                    }}
+                    style={[
+                      s.reviewSortOption,
+                      reviewSort === option && s.reviewSortOptionActive,
+                    ]}
+                  >
+                    <Text
+                      style={[
+                        s.reviewSortOptionText,
+                        reviewSort === option &&
+                          s.reviewSortOptionTextActive,
+                      ]}
+                    >
+                      {option === "top" ? "Top reviews" : "Most recent"}
+                    </Text>
+                  </Pressable>
+                ))}
+              </View>
+            )}
+          </View>
+        )}
         {visibleReviews.map((r) => (
           <ReviewCard
             key={r.id}
@@ -3780,6 +4220,8 @@ function ReviewScreen({
   const [text, setText] = useState(existingReview?.text || "");
   const [tags, setTags] = useState<string[]>(existingReview?.tags || []);
   const [saving, setSaving] = useState(false);
+  const [deleteReviewVisible, setDeleteReviewVisible] = useState(false);
+  const [deletingReview, setDeletingReview] = useState(false);
   const [customNote, setCustomNote] = useState("");
   const [addingCustom, setAddingCustom] = useState(false);
   const [keyboardVisible, setKeyboardVisible] = useState(false);
@@ -3998,34 +4440,7 @@ function ReviewScreen({
                 accessibilityLabel="Delete review"
                 style={s.deleteReviewButton}
                 disabled={saving}
-                onPress={() =>
-                  Alert.alert(
-                    "Delete review?",
-                    "This removes the review from your profile and the drink page.",
-                    [
-                      { text: "Cancel", style: "cancel" },
-                      {
-                        text: "Delete",
-                        style: "destructive",
-                        onPress: async () => {
-                          try {
-                            setSaving(true);
-                            await onDelete();
-                          } catch (error) {
-                            Alert.alert(
-                              "Could not delete review",
-                              error instanceof Error
-                                ? error.message
-                                : "Please try again.",
-                            );
-                          } finally {
-                            setSaving(false);
-                          }
-                        },
-                      },
-                    ],
-                  )
-                }
+                onPress={() => setDeleteReviewVisible(true)}
               >
                 <Trash2 size={17} color={C.red} />
                 <Text style={s.deleteReviewText}>Delete Review</Text>
@@ -4080,6 +4495,83 @@ function ReviewScreen({
           </View>
         </ScrollView>
       </View>
+      <Modal
+        visible={deleteReviewVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setDeleteReviewVisible(false)}
+      >
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Close delete review confirmation"
+          onPress={() => !deletingReview && setDeleteReviewVisible(false)}
+          style={s.confirmOverlay}
+        >
+          <Pressable
+            accessibilityRole="none"
+            onPress={(event) => event.stopPropagation()}
+            style={s.logoutConfirmCard}
+          >
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Close delete review confirmation"
+              disabled={deletingReview}
+              onPress={() => setDeleteReviewVisible(false)}
+              style={s.confirmCloseButton}
+            >
+              <X size={17} color={C.teal} />
+            </Pressable>
+            <Text style={s.logoutConfirmTitle}>Delete review?</Text>
+            <Text style={s.logoutConfirmCopy}>
+              This removes the review from your profile and the drink page.
+            </Text>
+            <View style={s.logoutConfirmActions}>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Cancel deleting review"
+                disabled={deletingReview}
+                onPress={() => setDeleteReviewVisible(false)}
+                style={s.logoutCancelButton}
+              >
+                <Text style={s.secondaryText}>Cancel</Text>
+              </Pressable>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Confirm deleting review"
+                disabled={deletingReview}
+                onPress={() => {
+                  void (async () => {
+                    try {
+                      setDeletingReview(true);
+                      await onDelete?.();
+                      setDeleteReviewVisible(false);
+                    } catch (error) {
+                      Alert.alert(
+                        "Could not delete review",
+                        error instanceof Error
+                          ? error.message
+                          : "Please try again.",
+                      );
+                    } finally {
+                      setDeletingReview(false);
+                    }
+                  })();
+                }}
+                style={s.logoutConfirmButton}
+              >
+                {deletingReview ? (
+                  <ActivityIndicator color="#fff" size="small" />
+                ) : (
+                  <>
+                    <Trash2 size={15} color={C.cream} />
+                    <Text style={s.primaryText}>Delete</Text>
+                  </>
+                )}
+              </Pressable>
+            </View>
+          </Pressable>
+        </Pressable>
+      </Modal>
     </Background>
   );
 }
@@ -4269,7 +4761,13 @@ function ShareReceiptCard({
                 </Text>
               </View>
             </View>
-            <Text style={s.shareReceiptReview}>“{review.text}”</Text>
+            <Text
+              numberOfLines={3}
+              ellipsizeMode="tail"
+              style={s.shareReceiptReview}
+            >
+              “{review.text}”
+            </Text>
           </View>
         ))}
         <Text style={s.shareReceiptFooter}>saturated.app</Text>
@@ -4602,7 +5100,7 @@ function Profile({
         contentContainerStyle={s.profilePageContent}
       >
         {isOwn ? (
-          <View style={s.headerRow}>
+          <View style={[s.headerRow, s.profileHeaderRow]}>
             <Text style={s.headingText}>Profile</Text>
             <Pressable
               accessibilityRole="button"
@@ -4610,7 +5108,7 @@ function Profile({
               onPress={onSettings}
               style={s.headerIcon}
             >
-              <Settings color={C.red} />
+              <Settings color={C.red} size={26} />
             </Pressable>
           </View>
         ) : (
@@ -4812,8 +5310,11 @@ function Profile({
                 {my.map((r, i) => {
                   const d = drinks.find((x) => x.id === r.drinkId)!;
                   return (
-                    <View
+                    <Pressable
                       key={r.id}
+                      accessibilityRole="button"
+                      accessibilityLabel={`Open full review for ${d?.name}`}
+                      onPress={() => onOpenReview(r)}
                       style={[
                         s.receiptItem,
                         i < my.length - 1 && s.receiptItemDivider,
@@ -4840,7 +5341,10 @@ function Profile({
                                 <Pressable
                                   accessibilityRole="button"
                                   accessibilityLabel={`Edit review for ${d?.name}`}
-                                  onPress={() => onEditReview(r)}
+                                  onPress={(event) => {
+                                    event.stopPropagation();
+                                    onEditReview(r);
+                                  }}
                                   style={s.receiptEditButton}
                                 >
                                   <Edit3 size={12} color={C.red} />
@@ -4862,9 +5366,15 @@ function Profile({
                         accessibilityLabel={`Read ${d?.name} review`}
                         onPress={() => onOpenReview(r)}
                       >
-                        <Text style={s.receiptReviewText}>“{r.text}”</Text>
+                        <Text
+                          numberOfLines={3}
+                          ellipsizeMode="tail"
+                          style={s.receiptReviewText}
+                        >
+                          “{r.text}”
+                        </Text>
                       </Pressable>
-                    </View>
+                    </Pressable>
                   );
                 })}
               </View>
@@ -4923,12 +5433,13 @@ function SettingsScreen({
   onBack,
   onRequest,
   onSaveAccount,
-  onUploadAvatar,
+  onChooseAvatar,
   onExportData,
   onDeleteAccount,
   onLogout,
   isModerator,
   onModeration,
+  onCatalogueAdmin,
   initialSection = "menu",
 }: {
   name: string;
@@ -4945,13 +5456,15 @@ function SettingsScreen({
     name: string;
     username: string;
     email: string;
+    avatarUri?: string;
   }) => Promise<void> | void;
-  onUploadAvatar: () => Promise<boolean>;
+  onChooseAvatar: () => Promise<string | undefined>;
   onExportData: () => Promise<unknown>;
   onDeleteAccount: () => void;
   onLogout: () => void;
   isModerator: boolean;
   onModeration: () => void;
+  onCatalogueAdmin: () => void;
   initialSection?: "menu" | "account";
 }) {
   const [section, setSection] = useState<"menu" | "account" | "gdpr">(
@@ -4960,7 +5473,10 @@ function SettingsScreen({
   const [draftName, setDraftName] = useState(name);
   const [draftUsername, setDraftUsername] = useState(username);
   const [draftEmail, setDraftEmail] = useState(email);
+  const [draftAvatarUri, setDraftAvatarUri] = useState<string>();
   const [accountEditing, setAccountEditing] = useState(false);
+  const [accountSaving, setAccountSaving] = useState(false);
+  const [accountSavedVisible, setAccountSavedVisible] = useState(false);
   const [logoutVisible, setLogoutVisible] = useState(false);
   const settingsScroll = useRememberedScroll(`settings-${section}`);
 
@@ -5008,7 +5524,7 @@ function SettingsScreen({
               <View style={s.settingsPhotoEditor}>
                 <UserAvatar
                   name={draftName || name || "Saturated User"}
-                  source={avatar}
+                  source={draftAvatarUri ? { uri: draftAvatarUri } : avatar}
                   size={72}
                   style={s.settingsDetailAvatar}
                 />
@@ -5021,13 +5537,9 @@ function SettingsScreen({
                     !accountEditing && s.settingsControlDisabled,
                   ]}
                   onPress={() =>
-                    void onUploadAvatar()
-                      .then((uploaded) => {
-                        if (uploaded)
-                          Alert.alert(
-                            "Profile picture updated",
-                            "Your new picture is now visible on your profile.",
-                          );
+                    void onChooseAvatar()
+                      .then((uri) => {
+                        if (uri) setDraftAvatarUri(uri);
                       })
                       .catch((error) =>
                         Alert.alert(
@@ -5097,10 +5609,11 @@ function SettingsScreen({
                   accountEditing ? "Save account details" : "Edit profile"
                 }
                 disabled={
-                  accountEditing &&
-                  (!draftName.trim() ||
-                    !draftUsername.trim() ||
-                    !draftEmail.trim())
+                  accountSaving ||
+                  (accountEditing &&
+                    (!draftName.trim() ||
+                      !draftUsername.trim() ||
+                      !draftEmail.trim()))
                 }
                 onPress={() => {
                   if (!accountEditing) {
@@ -5113,19 +5626,19 @@ function SettingsScreen({
                     ? draftUsername.trim()
                     : `@${draftUsername.trim()}`;
                   setDraftUsername(normalizedUsername);
+                  setAccountSaving(true);
                   void Promise.resolve(
                     onSaveAccount({
                       name: draftName.trim(),
                       username: normalizedUsername,
                       email: draftEmail.trim(),
+                      avatarUri: draftAvatarUri,
                     }),
                   )
                     .then(() => {
+                      setDraftAvatarUri(undefined);
                       setAccountEditing(false);
-                      Alert.alert(
-                        "Account updated",
-                        "Your profile details were saved.",
-                      );
+                      setAccountSavedVisible(true);
                     })
                     .catch((error) =>
                       Alert.alert(
@@ -5134,13 +5647,22 @@ function SettingsScreen({
                           ? error.message
                           : "Please try again.",
                       ),
-                    );
+                    )
+                    .finally(() => setAccountSaving(false));
                 }}
-                style={s.settingsPrimaryButton}
+                style={({ pressed }) => [
+                  s.settingsPrimaryButton,
+                  pressed && s.primaryButtonPressed,
+                  accountSaving && s.primaryButtonBusy,
+                ]}
               >
-                <Text style={s.primaryText}>
-                  {accountEditing ? "Save changes" : "Edit profile"}
-                </Text>
+                {accountSaving ? (
+                  <ActivityIndicator color="#fff" size="small" />
+                ) : (
+                  <Text style={s.primaryText}>
+                    {accountEditing ? "Save changes" : "Edit profile"}
+                  </Text>
+                )}
               </Pressable>
             </View>
           )}
@@ -5237,6 +5759,46 @@ function SettingsScreen({
             </View>
           )}
         </ScrollView>
+        <Modal
+          visible={accountSavedVisible}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setAccountSavedVisible(false)}
+        >
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Close account updated message"
+            onPress={() => setAccountSavedVisible(false)}
+            style={s.confirmOverlay}
+          >
+            <Pressable
+              accessibilityRole="none"
+              onPress={(event) => event.stopPropagation()}
+              style={s.logoutConfirmCard}
+            >
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Close account updated message"
+                onPress={() => setAccountSavedVisible(false)}
+                style={s.confirmCloseButton}
+              >
+                <X size={17} color={C.teal} />
+              </Pressable>
+              <Text style={s.logoutConfirmTitle}>Account updated</Text>
+              <Text style={s.logoutConfirmCopy}>
+                Your profile details were saved.
+              </Text>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Close account updated message"
+                onPress={() => setAccountSavedVisible(false)}
+                style={s.logoutConfirmButton}
+              >
+                <Text style={s.primaryText}>Done</Text>
+              </Pressable>
+            </Pressable>
+          </Pressable>
+        </Modal>
       </Background>
     );
   }
@@ -5339,6 +5901,12 @@ function SettingsScreen({
                 subtitle="Review reports and take safety action"
                 onPress={onModeration}
               />
+              <SettingsOption
+                icon={<CirclePlus size={20} color={C.teal} />}
+                title="Catalogue operations"
+                subtitle="Approve catalogue records and resolve drink requests"
+                onPress={onCatalogueAdmin}
+              />
             </View>
           </>
         )}
@@ -5440,6 +6008,42 @@ function ModerationScreen({
         busyId={busyId}
         onRefresh={onRefresh}
         onResolve={onResolve}
+      />
+    </Background>
+  );
+}
+
+function AdminOperationsScreen({ onBack }: { onBack: () => void }) {
+  return (
+    <Background>
+      <Heading back onBack={onBack}>
+        Catalogue Admin
+      </Heading>
+      <AdminOperationsContent />
+    </Background>
+  );
+}
+
+function NotificationScreen({
+  notifications,
+  onBack,
+  onOpen,
+  onMarkAll,
+}: {
+  notifications: DatabaseNotification[];
+  onBack: () => void;
+  onOpen: (notification: DatabaseNotification) => void;
+  onMarkAll: () => void;
+}) {
+  return (
+    <Background>
+      <Heading back onBack={onBack}>
+        Notifications
+      </Heading>
+      <NotificationsContent
+        notifications={notifications}
+        onOpen={onOpen}
+        onMarkAll={onMarkAll}
       />
     </Background>
   );
@@ -5727,6 +6331,7 @@ export default function App() {
   const setScreen = useCallback((nextScreen: Screen) => {
     setSlideNavigation(false);
     setScreenState(nextScreen);
+    void trackEvent("screen_viewed", { screen: nextScreen });
   }, []);
   const [onboard, setOnboard] = useState(false);
   const [session, setSession] = useState<Session | null>(null);
@@ -5756,6 +6361,7 @@ export default function App() {
   const [badgeTab, setBadgeTab] = useState(false);
   const [searchReturn, setSearchReturn] = useState<Screen>("explore");
   const [drinkReturn, setDrinkReturn] = useState<Screen>("explore");
+  const [drinkHistory, setDrinkHistory] = useState<Drink[]>([]);
   const [requestReturn, setRequestReturn] = useState<Screen>("search");
   const [requestDraft, setRequestDraft] = useState("");
   const [requests, setRequests] = useState<string[]>([]);
@@ -5770,14 +6376,17 @@ export default function App() {
   const [moderationReports, setModerationReports] = useState<
     DatabaseModerationReport[]
   >([]);
+  const [notifications, setNotifications] = useState<DatabaseNotification[]>([]);
   const [moderationBusyId, setModerationBusyId] = useState<string>();
   const [passwordRecoveryVisible, setPasswordRecoveryVisible] = useState(false);
+  const [pendingDeepLink, setPendingDeepLink] = useState<AppRoute | null>(null);
   const [termsRequired, setTermsRequired] = useState(false);
   const [settingsInitialSection, setSettingsInitialSection] = useState<
     "menu" | "account"
   >("menu");
   const [onboarded, setOnboarded] = useState(false);
   const [ready, setReady] = useState(false);
+  const [minimumSplashElapsed, setMinimumSplashElapsed] = useState(false);
   const isOAuthConsentRoute =
     Platform.OS === "web" &&
     typeof window !== "undefined" &&
@@ -5785,6 +6394,10 @@ export default function App() {
   const oauthAuthorizationId = isOAuthConsentRoute
     ? new URLSearchParams(window.location.search).get("authorization_id")
     : null;
+  useEffect(() => {
+    const timer = setTimeout(() => setMinimumSplashElapsed(true), 2000);
+    return () => clearTimeout(timer);
+  }, []);
 
   const refreshDatabaseState = async (activeSession: Session | null) => {
     const [catalogueRows, profileRows, reviewRows] = await Promise.all([
@@ -5838,6 +6451,7 @@ export default function App() {
       setRequests([]);
       setIsModerator(false);
       setModerationReports([]);
+      setNotifications([]);
       setTermsRequired(false);
       return;
     }
@@ -5949,6 +6563,13 @@ export default function App() {
     setIsModerator(moderatorStatus);
     setTermsRequired(!resolvedProfile.terms_accepted_at);
     setModerationReports(moderatorStatus ? await loadModerationQueue() : []);
+    try {
+      setNotifications(await loadNotifications(userId));
+    } catch {
+      // Notifications are additive and must not prevent account loading while a
+      // new database migration is being rolled out.
+      setNotifications([]);
+    }
     setRequests(
       requestRows
         .map((request) => String(request.drink_name || ""))
@@ -6033,11 +6654,26 @@ export default function App() {
         setScreen(nextSession ? "explore" : "splash");
       }
     };
-    const consumeAuthUrl = (url: string | null) => {
+    const consumeAuthUrl = async (url: string | null) => {
       if (url?.includes("auth/callback")) {
-        void handleAuthCallback(url).catch((error) =>
-          Alert.alert("Sign-in failed", error.message),
-        );
+        const pendingPasswordRecovery =
+          (await AsyncStorage.getItem(PENDING_PASSWORD_RECOVERY_KEY)) ===
+          "pending";
+        const isPasswordRecovery =
+          pendingPasswordRecovery || /(?:[?#&])type=recovery(?:[&#]|$)/i.test(url);
+        try {
+          await handleAuthCallback(url);
+          if (isPasswordRecovery) {
+            await AsyncStorage.removeItem(PENDING_PASSWORD_RECOVERY_KEY);
+            setOnboard(false);
+            setPasswordRecoveryVisible(true);
+          }
+        } catch (error) {
+          Alert.alert(
+            isPasswordRecovery ? "Password reset failed" : "Sign-in failed",
+            error instanceof Error ? error.message : "Please try again.",
+          );
+        }
         return;
       }
       const groupInvite = url?.match(/groups\/join\/([^/?#]+)/i)?.[1];
@@ -6067,12 +6703,15 @@ export default function App() {
             );
           }
         });
+        return;
       }
+      const appRoute = url ? parseAppUrl(url) : null;
+      if (appRoute) setPendingDeepLink(appRoute);
     };
-    const urlSubscription = Linking.addEventListener("url", ({ url }) =>
-      consumeAuthUrl(url),
-    );
-    void Linking.getInitialURL().then(consumeAuthUrl);
+    const urlSubscription = Linking.addEventListener("url", ({ url }) => {
+      void consumeAuthUrl(url);
+    });
+    void Linking.getInitialURL().then((url) => consumeAuthUrl(url));
     const authSubscription = supabase.auth.onAuthStateChange(
       (event, nextSession) => {
         if (event === "INITIAL_SESSION") return;
@@ -6138,15 +6777,94 @@ export default function App() {
     requests,
     followedProfiles,
   ]);
+  useEffect(() => {
+    if (!supabase || !session) return;
+    const notificationClient = supabase;
+    const userId = session.user.id;
+    const channel = notificationClient
+      .channel(`notifications:${userId}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "INSERT",
+          schema: "public",
+          table: "notifications",
+          filter: `user_id=eq.${userId}`,
+        },
+        () => {
+          void loadNotifications(userId)
+            .then(setNotifications)
+            .catch(() => undefined);
+        },
+      )
+      .subscribe();
+    return () => {
+      void notificationClient.removeChannel(channel);
+    };
+  }, [session]);
   const appDrinks = catalogueDrinks.length ? catalogueDrinks : drinks;
   const appProfiles = (
     databaseProfiles.length ? databaseProfiles : searchableProfiles
   ).filter((profile) => !blockedProfiles.includes(profile.id));
+  useEffect(() => {
+    if (!ready || !pendingDeepLink) return;
+    const route = pendingDeepLink;
+    setPendingDeepLink(null);
+    if (
+      !session &&
+      ["profile", "notifications", "settings", "drinklist"].includes(
+        route.name,
+      )
+    ) {
+      setOnboard(true);
+      return;
+    }
+    if (route.name === "drink") {
+      const drink = appDrinks.find((item) => item.id === route.drinkId);
+      if (drink) {
+        setSelected(drink);
+        setDrinkReturn("explore");
+        setScreen("drink");
+      }
+      return;
+    }
+    if (route.name === "reviewDetail") {
+      const targetReview = reviews.find((item) => item.id === route.reviewId);
+      if (targetReview) {
+        const drink = appDrinks.find(
+          (item) => item.id === targetReview.drinkId,
+        );
+        if (drink) setSelected(drink);
+        setSelectedReviewId(targetReview.id);
+        setReviewDetailReturn("explore");
+        setScreen("reviewDetail");
+      }
+      return;
+    }
+    if (route.name === "userProfile") {
+      const profile = appProfiles.find(
+        (item) => item.id === route.profileId,
+      );
+      if (profile) {
+        setSelectedProfile(profile);
+        setProfileReturn("explore");
+        setBadgeTab(false);
+        setScreen("userProfile");
+      }
+      return;
+    }
+    if (route.name === "search") {
+      rememberedSearchQuery = route.query || "";
+      rememberedSearchMode = route.mode || "beverages";
+    }
+    setScreen(route.name);
+  }, [appDrinks, appProfiles, pendingDeepLink, ready, reviews, session, setScreen]);
   const go = (nextScreen: Screen, fromNavbar = false) => {
     if (nextScreen === "search") setSearchReturn(screen);
     if (nextScreen === "profile") setBadgeTab(false);
     setSlideNavigation(fromNavbar);
     setScreenState(nextScreen);
+    void trackEvent("screen_viewed", { screen: nextScreen });
   };
   useEffect(() => {
     if (Platform.OS !== "android") return;
@@ -6163,11 +6881,18 @@ export default function App() {
           reviewDetail: reviewDetailReturn,
           settings: "profile",
           moderation: "settings",
+          catalogueAdmin: "settings",
+          notifications: "explore",
           groups: "feed",
           feed: "explore",
           drinklist: "explore",
           profile: "explore",
         };
+        if (screen === "drink" && drinkHistory.length) {
+          setSelected(drinkHistory[drinkHistory.length - 1]);
+          setDrinkHistory((history) => history.slice(0, -1));
+          return true;
+        }
         const previous = previousScreen[screen];
         if (!previous) return false;
         setScreen(previous);
@@ -6177,6 +6902,7 @@ export default function App() {
     return () => subscription.remove();
   }, [
     drinkReturn,
+    drinkHistory,
     onboard,
     profileReturn,
     requestReturn,
@@ -6187,8 +6913,24 @@ export default function App() {
   ]);
   const open = (d: Drink) => {
     setDrinkReturn(screen);
+    setDrinkHistory([]);
     setSelected(d);
     setScreen("drink");
+    void trackEvent("drink_opened", { drink_type: d.type });
+  };
+  const openRelatedDrink = (nextDrink: Drink) => {
+    if (nextDrink.id === selected.id) return;
+    setDrinkHistory((history) => [...history, selected]);
+    setSelected(nextDrink);
+    void trackEvent("drink_opened", { drink_type: nextDrink.type });
+  };
+  const closeDrinkProfile = () => {
+    if (drinkHistory.length) {
+      setSelected(drinkHistory[drinkHistory.length - 1]);
+      setDrinkHistory((history) => history.slice(0, -1));
+      return;
+    }
+    setScreen(drinkReturn);
   };
   const openProfile = (profileToOpen: SearchProfile) => {
     setProfileReturn(screen);
@@ -6228,6 +6970,37 @@ export default function App() {
     setSelected(drinkToEdit);
     setScreen("review");
   };
+  const removeOwnedReview = async (
+    reviewToDelete: Review,
+    returnScreen: Screen,
+  ) => {
+    await deleteReview(reviewToDelete.id);
+    const [reviewRows, catalogueRows, badgeRows] = await Promise.all([
+      loadReviews(),
+      loadCatalogue(),
+      session ? loadBadges(session.user.id) : Promise.resolve([]),
+    ]);
+    const activeCatalogueDrinks = withNewCatalogueFallback(catalogueRows)
+      .filter(beverageHasCatalogArtwork)
+      .map(beverageFromDatabase);
+    const activeDrinkIds = new Set(
+      activeCatalogueDrinks.map((drink) => drink.id),
+    );
+    setReviews(
+      reviewRows
+        .map(reviewFromDatabase)
+        .filter((reviewItem) => activeDrinkIds.has(reviewItem.drinkId)),
+    );
+    setCatalogueDrinks(activeCatalogueDrinks);
+    setBadges(badgeRows);
+    setCommentThreads((current) => {
+      const next = { ...current };
+      delete next[reviewToDelete.id];
+      return next;
+    });
+    setEditingReviewId(null);
+    setScreen(returnScreen);
+  };
   const openReview = (reviewToOpen: Review) => {
     setReviewDetailReturn(screen);
     setSelectedReviewId(reviewToOpen.id);
@@ -6248,6 +7021,48 @@ export default function App() {
         );
     }
     setScreen("reviewDetail");
+  };
+  const openNotification = (notification: DatabaseNotification) => {
+    setNotifications((current) =>
+      current.map((item) =>
+        item.id === notification.id ? { ...item, is_read: true } : item,
+      ),
+    );
+    void markNotificationRead(notification.id).catch(() => undefined);
+    void trackEvent("notification_opened", { kind: notification.kind });
+    if (notification.kind === "follow") {
+      const actor = Array.isArray(notification.actor)
+        ? notification.actor[0]
+        : notification.actor;
+      const profile = actor
+        ? appProfiles.find((item) => item.id === actor.id)
+        : undefined;
+      if (profile) openProfile(profile);
+      return;
+    }
+    if (notification.kind === "badge_earned") {
+      setBadgeTab(true);
+      setScreen("profile");
+      return;
+    }
+    const matchingReview = notification.review_id
+      ? reviews.find((item) => item.id === notification.review_id)
+      : undefined;
+    if (matchingReview) {
+      openReview(matchingReview);
+      return;
+    }
+    const matchingDrink = notification.beverage_id
+      ? appDrinks.find((item) => item.id === notification.beverage_id)
+      : undefined;
+    if (matchingDrink) open(matchingDrink);
+  };
+  const readAllNotifications = () => {
+    setNotifications((current) =>
+      current.map((item) => ({ ...item, is_read: true })),
+    );
+    if (session)
+      void markAllNotificationsRead(session.user.id).catch(() => undefined);
   };
   const requestDrink = (returnScreen: Screen, initialName = "") => {
     setRequestReturn(returnScreen);
@@ -6412,6 +7227,7 @@ export default function App() {
           ? Array.from(new Set([...current, profileId]))
           : current.filter((id) => id !== profileId),
       );
+      if (followed) void trackEvent("profile_followed");
     } catch (error) {
       Alert.alert(
         "Could not update buddy",
@@ -6525,6 +7341,10 @@ export default function App() {
           ? Array.from(new Set([...current, id]))
           : current.filter((item) => item !== id),
       );
+      if (added) {
+        const drink = appDrinks.find((item) => item.id === id);
+        void trackEvent("drink_saved", { drink_type: drink?.type || "unknown" });
+      }
     } catch (error) {
       Alert.alert(
         "Could not update Drinklist",
@@ -6623,8 +7443,17 @@ export default function App() {
         items={appDrinks}
         reviews={reviews}
         currentUserId={session?.user.id}
+        unreadNotificationCount={
+          notifications.filter((item) => !item.is_read).length
+        }
         onOpen={open}
-        onGo={go}
+        onGo={(nextScreen, fromNavbar) => {
+          if (nextScreen === "notifications" && !session) {
+            setOnboard(true);
+            return;
+          }
+          go(nextScreen, fromNavbar);
+        }}
         onRefreshData={() => refreshDatabaseState(session)}
       />
     );
@@ -6677,7 +7506,7 @@ export default function App() {
         drinks={appDrinks}
         reviews={reviews}
         saved={saved.includes(selected.id)}
-        onBack={() => setScreen(drinkReturn)}
+        onBack={closeDrinkProfile}
         onReview={() => review(selected)}
         onToggle={() => void toggle(selected.id)}
         onLike={(id) => void like(id)}
@@ -6693,7 +7522,7 @@ export default function App() {
         likedReviewIds={likedReviews}
         onOpenReview={openReview}
         onOpenProfile={openProfileByName}
-        onOpenDrink={(drinkToOpen) => setSelected(drinkToOpen)}
+        onOpenDrink={openRelatedDrink}
       />
     );
   else if (screen === "reviewDetail")
@@ -6729,6 +7558,11 @@ export default function App() {
         }
         onOpenProfile={openProfileByName}
         onOpenDrink={open}
+        isOwnReview={selectedReview.userId === session?.user.id}
+        onEditReview={() => editReview(selectedReview)}
+        onDeleteReview={() =>
+          removeOwnedReview(selectedReview, reviewDetailReturn)
+        }
       />
     );
   else if (screen === "review")
@@ -6751,6 +7585,11 @@ export default function App() {
             rating,
             body: text,
             tags,
+          });
+          void trackEvent("review_submitted", {
+            editing: Boolean(editingReviewId),
+            rating,
+            drink_type: selected.type,
           });
           const [reviewRows, catalogueRows, drinklistIds, badgeRows] =
             await Promise.all([
@@ -6778,19 +7617,7 @@ export default function App() {
         }}
         onDelete={
           reviewBeingEdited
-            ? async () => {
-                await deleteReview(reviewBeingEdited.id);
-                setReviews((current) =>
-                  current.filter((item) => item.id !== reviewBeingEdited.id),
-                );
-                setCommentThreads((current) => {
-                  const next = { ...current };
-                  delete next[reviewBeingEdited.id];
-                  return next;
-                });
-                setEditingReviewId(null);
-                setScreen(reviewReturn);
-              }
+            ? () => removeOwnedReview(reviewBeingEdited, reviewReturn)
             : undefined
         }
       />
@@ -6880,10 +7707,14 @@ export default function App() {
         onRequest={() => requestDrink("settings")}
         onSaveAccount={async (details) => {
           if (!session) return;
+          const avatarUrl = details.avatarUri
+            ? await uploadAvatar(session.user.id, details.avatarUri)
+            : currentProfile?.avatar_url || undefined;
           const profile = await updateCurrentProfile(session.user, {
             displayName: details.name,
             username: details.username,
             email: details.email,
+            avatarUrl,
           });
           setCurrentProfile(profile);
           setName(profile.display_name);
@@ -6893,9 +7724,31 @@ export default function App() {
               : "@user",
           );
           setEmail(details.email);
+          if (profile.avatar_url) {
+            const avatarSource = { uri: profile.avatar_url };
+            setReviews((items) =>
+              items.map((review) =>
+                review.userId === session.user.id
+                  ? { ...review, avatar: avatarSource }
+                  : review,
+              ),
+            );
+            setCommentThreads((threads) =>
+              Object.fromEntries(
+                Object.entries(threads).map(([reviewId, comments]) => [
+                  reviewId,
+                  comments.map((comment) =>
+                    comment.userId === session.user.id
+                      ? { ...comment, avatar: avatarSource }
+                      : comment,
+                  ),
+                ]),
+              ),
+            );
+          }
           setDatabaseProfiles((await loadProfiles()).map(profileFromDatabase));
         }}
-        onUploadAvatar={async () => {
+        onChooseAvatar={async () => {
           if (!session)
             throw new Error("Sign in to update your profile picture.");
           const permission =
@@ -6905,7 +7758,7 @@ export default function App() {
               "Photo permission required",
               "Allow photo access to update your profile picture.",
             );
-            return false;
+            return undefined;
           }
           const picked = await ImagePicker.launchImageLibraryAsync({
             mediaTypes: ["images"],
@@ -6913,57 +7766,8 @@ export default function App() {
             aspect: [1, 1],
             quality: 0.85,
           });
-          if (picked.canceled) return false;
-          const localAvatarUri = picked.assets[0].uri;
-          const previousAvatarUrl = currentProfile?.avatar_url || null;
-          setCurrentProfile((profile) =>
-            profile ? { ...profile, avatar_url: localAvatarUri } : profile,
-          );
-          let avatarUrl: string;
-          try {
-            avatarUrl = await uploadAvatar(session.user.id, localAvatarUri);
-          } catch (error) {
-            setCurrentProfile((profile) =>
-              profile ? { ...profile, avatar_url: previousAvatarUrl } : profile,
-            );
-            throw error;
-          }
-          const avatarSource = { uri: avatarUrl };
-          setCurrentProfile((profile) =>
-            profile ? { ...profile, avatar_url: avatarUrl } : profile,
-          );
-          setDatabaseProfiles((profiles) =>
-            profiles.map((profile) =>
-              profile.id === session.user.id
-                ? { ...profile, avatar: avatarSource }
-                : profile,
-            ),
-          );
-          setReviews((items) =>
-            items.map((review) =>
-              review.userId === session.user.id
-                ? { ...review, avatar: avatarSource }
-                : review,
-            ),
-          );
-          setCommentThreads((threads) =>
-            Object.fromEntries(
-              Object.entries(threads).map(([reviewId, comments]) => [
-                reviewId,
-                comments.map((comment) =>
-                  comment.userId === session.user.id
-                    ? { ...comment, avatar: avatarSource }
-                    : comment,
-                ),
-              ]),
-            ),
-          );
-          void loadProfiles()
-            .then((profiles) =>
-              setDatabaseProfiles(profiles.map(profileFromDatabase)),
-            )
-            .catch(() => undefined);
-          return true;
+          if (picked.canceled) return undefined;
+          return picked.assets[0].uri;
         }}
         onExportData={async () => {
           if (!session) throw new Error("Sign in to export your data.");
@@ -6982,6 +7786,7 @@ export default function App() {
         }}
         isModerator={isModerator}
         onModeration={() => setScreen("moderation")}
+        onCatalogueAdmin={() => setScreen("catalogueAdmin")}
       />
     );
   else if (screen === "moderation")
@@ -6992,6 +7797,17 @@ export default function App() {
         onBack={() => setScreen("settings")}
         onRefresh={() => void refreshModeration()}
         onResolve={(report, action) => void moderateReport(report, action)}
+      />
+    );
+  else if (screen === "catalogueAdmin")
+    body = <AdminOperationsScreen onBack={() => setScreen("settings")} />;
+  else if (screen === "notifications")
+    body = (
+      <NotificationScreen
+        notifications={notifications}
+        onBack={() => setScreen("explore")}
+        onOpen={openNotification}
+        onMarkAll={readAllNotifications}
       />
     );
   else if (screen === "feed" || screen === "groups")
@@ -7017,11 +7833,11 @@ export default function App() {
           screen={screen}
           animate={slideNavigation}
         >
-          {body}
+          {!minimumSplashElapsed && !isOAuthConsentRoute ? <Splash /> : body}
         </ScreenTransition>
       </ResponsiveAppFrame>
       <Onboarding
-        visible={onboard}
+        visible={onboard && minimumSplashElapsed}
         onEmailSignIn={async (accountEmail, password) => {
           await signInWithEmail(accountEmail, password);
         }}
@@ -7064,7 +7880,13 @@ export default function App() {
             throw error;
           }
         }}
-        onForgotPassword={sendPasswordResetEmail}
+        onForgotPassword={async (accountEmail) => {
+          await sendPasswordResetEmail(accountEmail);
+          await AsyncStorage.setItem(
+            PENDING_PASSWORD_RECOVERY_KEY,
+            "pending",
+          );
+        }}
       />
       <ReportModal
         target={reportTarget}
