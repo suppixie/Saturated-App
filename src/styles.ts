@@ -1534,12 +1534,35 @@ const s = StyleSheet.create({
     height: 140,
     overflow: "visible",
   },
+  // Was: a full-size card shrunk with transform:[{scale:0.745}]. A scale
+  // transform resamples already-rendered content, so the labels came out
+  // visibly soft next to the rest of the screen. The card is now laid out at
+  // its real compact size instead -- text renders crisply at its own point size.
   moreLikeThisCardInner: {
-    position: "absolute",
-    left: 0,
-    top: 0,
-    transformOrigin: "top left",
-    transform: [{ scale: 0.745 }],
+    width: 82,
+    height: 140,
+  },
+  // Compact card internals: 110x187 -> 82x140 (same 0.745 ratio, applied as
+  // real dimensions rather than a post-render transform).
+  drinkCardCompact: {
+    width: 82,
+    height: 140,
+  },
+  drinkImageFrameCompact: {
+    width: 82,
+    height: 115,
+  },
+  drinkImageCompact: {
+    width: 86,
+    height: 121,
+  },
+  drinkLabelCompact: {
+    height: 25,
+    paddingTop: 2,
+  },
+  drinkNameCompact: {
+    fontSize: 9,
+    maxWidth: 74,
   },
   commonTagsText: {
     fontFamily: F.medium,

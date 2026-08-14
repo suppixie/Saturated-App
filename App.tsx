@@ -159,7 +159,7 @@ import {
   resolveModerationReport,
   markAllNotificationsRead,
   markNotificationRead,
-  updateCurrentDateOfBirth,
+  verifyAge,
   updateCurrentProfile,
   uploadAvatar,
   uploadGroupImage,
@@ -991,8 +991,12 @@ function DrinkCardGlow() {
 
 const DrinkCardVisual = memo(function DrinkCardVisual({
   drink,
+  compact = false,
 }: {
   drink: Drink;
+  /** Renders at the smaller "More like this" size using real dimensions.
+   *  (Previously that rail scaled a full-size card, which blurred the text.) */
+  compact?: boolean;
 }) {
   const [imageFailed, setImageFailed] = useState(false);
   useEffect(() => setImageFailed(false), [drink.id, drink.image]);
@@ -1026,12 +1030,13 @@ const DrinkCardVisual = memo(function DrinkCardVisual({
         />
       )}
       <DrinkCardGlow />
-      <View style={s.drinkImageFrame}>
+      <View style={[s.drinkImageFrame, compact && s.drinkImageFrameCompact]}>
         {!imageFailed && (
           <ExpoImage
             source={drink.image}
             style={[
               s.drinkImage,
+              compact && s.drinkImageCompact,
               remoteImage && (s.remoteDrinkImage as any),
               isSprite && s.spriteExploreImage,
               isSmallRootBeer && s.rootBeerExploreImage,
@@ -1045,11 +1050,22 @@ const DrinkCardVisual = memo(function DrinkCardVisual({
           />
         )}
       </View>
-      <View style={s.drinkLabel}>
-        <Text numberOfLines={1} style={s.drinkName}>
+      <View style={[s.drinkLabel, compact && s.drinkLabelCompact]}>
+        <Text
+          numberOfLines={1}
+          style={[s.drinkName, compact && s.drinkNameCompact]}
+        >
           {drink.name}
         </Text>
-        <Text style={[s.tiny, { color: drink.typeColor }]}>{drink.type}</Text>
+        <Text
+          style={[
+            s.tiny,
+            compact && { fontSize: 8, lineHeight: 11 },
+            { color: drink.typeColor },
+          ]}
+        >
+          {drink.type}
+        </Text>
       </View>
     </View>
   );
@@ -4253,9 +4269,13 @@ function DrinkProfile({
                     accessibilityRole="button"
                     accessibilityLabel={`Open ${similarDrink.name}`}
                     onPress={() => onOpenDrink(similarDrink)}
-                    style={[s.drinkCard, s.moreLikeThisCardInner]}
+                    style={[
+                      s.drinkCard,
+                      s.drinkCardCompact,
+                      s.moreLikeThisCardInner,
+                    ]}
                   >
-                    <DrinkCardVisual drink={similarDrink} />
+                    <DrinkCardVisual drink={similarDrink} compact />
                   </Pressable>
                 </View>
               ))}
@@ -6705,10 +6725,7 @@ export default function App() {
         );
         if (pendingBirthDate) {
           try {
-            await updateCurrentDateOfBirth(
-              nextSession.user.id,
-              pendingBirthDate,
-            );
+            await verifyAge(pendingBirthDate);
             await AsyncStorage.removeItem(PENDING_BIRTH_DATE_KEY);
           } catch (error) {
             console.warn("Could not save date of birth", error);

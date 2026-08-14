@@ -10,7 +10,6 @@ export type DatabaseProfile = {
   display_name: string;
   bio: string;
   avatar_url: string | null;
-  date_of_birth?: string | null;
   birth_verified_at: string | null;
   terms_accepted_at?: string | null;
   is_suspended?: boolean;
@@ -243,7 +242,7 @@ export async function loadProfiles() {
     client()
       .from("profiles")
       .select(
-        "id,username,display_name,bio,avatar_url,date_of_birth,birth_verified_at,terms_accepted_at,is_suspended,created_at",
+        "id,username,display_name,bio,avatar_url,birth_verified_at,terms_accepted_at,is_suspended,created_at",
       )
       .order("display_name"),
     client().from("follows").select("following_id"),
@@ -265,7 +264,7 @@ export async function loadCurrentProfile(userId: string) {
   const response = await client()
     .from("profiles")
     .select(
-      "id,username,display_name,bio,avatar_url,date_of_birth,birth_verified_at,terms_accepted_at,is_suspended,created_at",
+      "id,username,display_name,bio,avatar_url,birth_verified_at,terms_accepted_at,is_suspended,created_at",
     )
     .eq("id", userId)
     .single();
@@ -293,7 +292,7 @@ export async function updateCurrentProfile(
     })
     .eq("id", user.id)
     .select(
-      "id,username,display_name,bio,avatar_url,date_of_birth,birth_verified_at,terms_accepted_at,is_suspended,created_at",
+      "id,username,display_name,bio,avatar_url,birth_verified_at,terms_accepted_at,is_suspended,created_at",
     )
     .single();
   const profile = result(
@@ -313,22 +312,16 @@ export async function updateCurrentProfile(
   return profile;
 }
 
-export async function updateCurrentDateOfBirth(
-  userId: string,
-  dateOfBirth: string,
-) {
-  const response = await client()
-    .from("profiles")
-    .update({
-      date_of_birth: dateOfBirth,
-      birth_verified_at: new Date().toISOString(),
-    })
-    .eq("id", userId)
-    .select(
-      "id,username,display_name,bio,avatar_url,date_of_birth,birth_verified_at,terms_accepted_at,is_suspended,created_at",
-    )
-    .single();
-  return result(response.data, response.error) as DatabaseProfile;
+/**
+ * Server-side 18+ verification. The date is checked in the database and
+ * discarded -- only birth_verified_at is stored. Replaces the previous direct
+ * write, which let the client assert its own age and persisted the raw DOB.
+ */
+export async function verifyAge(dateOfBirth: string) {
+  const response = await client().rpc("verify_age", {
+    birth_date: dateOfBirth,
+  });
+  return result(response.data, response.error) as string;
 }
 
 export async function loadReviews() {

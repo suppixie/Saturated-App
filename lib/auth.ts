@@ -55,7 +55,32 @@ export async function signUpWithEmail(details: EmailSignUpDetails) {
       },
     },
   });
-  if (error) throw error;
+  if (error) {
+    // The signup trigger raises inside auth.users, so Supabase returns an
+    // opaque 500 whose body includes the project URL. Map the known causes to
+    // something a user can act on, and never surface the raw payload.
+    const raw = `${error.message ?? ""}`.toLowerCase();
+    if (
+      raw.includes("username") ||
+      raw.includes("duplicate key") ||
+      raw.includes("profiles_username")
+    ) {
+      throw new Error("That username is taken. Try another one.");
+    }
+    if (raw.includes("18+") || raw.includes("must be 18")) {
+      throw new Error("You must be 18 or over to use Saturated.");
+    }
+    if (
+      raw.includes("database error") ||
+      raw.includes("unexpected_failure") ||
+      /\b5\d\d\b/.test(raw)
+    ) {
+      throw new Error(
+        "We couldn't create your account just then. Please try again.",
+      );
+    }
+    throw error;
+  }
   if (data.user && data.user.identities?.length === 0) {
     throw new Error(
       "An account with this email already exists. Choose sign in instead.",
